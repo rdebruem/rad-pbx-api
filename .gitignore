@@ -1,0 +1,17 @@
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs (se rodar local pra teste)
+*.log
+
+# Test artifacts
+/tmp/
+*.bak
+*.bak.*
