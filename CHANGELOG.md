@@ -2,6 +2,25 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-05-20
+
+### Adicionado
+
+- **BLF/presença via AMI server-side no `rad-contacts.php`** ([ADR-0215](https://github.com/rdebruem/rad-ecosystem) — repo privado). A cada hit do polling do cliente (a cada 15s), o PHP abre conexão AMI em `127.0.0.1:5038`, dispara `Action: ExtensionStateList`, mapeia o `Status` numérico do Asterisk pro enum `Presence` do RAD (`available`, `on_call`, `busy`, `offline`), popula `presence` + `statusText` em cada contato do response, fecha conexão. Cliente Electron já tem pipeline pronto (`useContactsStore` escuta `presence:update`, UI mostra bolinha colorida + rótulo "Livre / Em chamada / Ocupado / Ausente / Offline").
+- **`install.sh` agora grava `AMI_USER` e `AMI_SECRET` no PHP automaticamente** (`php_set_ami_creds()`). As credenciais já eram perguntadas e gravadas no `manager.conf`; agora também vão pro PHP via `sed`. Usuário final não precisa de etapa manual extra.
+- Response do endpoint ganhou campo `amiOk: bool` indicando se a coleta AMI deu certo nesta request (UI ignora silenciosamente quando false; lista de contatos segue funcional sem `presence`).
+
+### Mudado
+
+- `install.sh` v0.3.0 — feature nova (BLF), bump minor.
+
+### Notas técnicas
+
+- Falha graceful: se AMI cai ou login falha, o request HTTP continua respondendo a lista de ramais sem presence (vs falhar com 500). `amiOk: false` sinaliza ao cliente que aquela rodada veio sem BLF.
+- Timeout AMI default: 3 segundos (constante `AMI_TIMEOUT_MS` no PHP). Suficiente pra AMI local em 127.0.0.1; ajustável se algum cliente tiver carga atípica.
+- Mapeamento `ExtensionStatus` code → `Presence` mantém paridade com `electron/ami.ts:amiStatusToPresence()` (cliente AMI direto, alternativo).
+- BLF só aparece pra ramais com `hint` definido no dialplan. FreePBX/Issabel padrão gera hints automaticamente pra cada ramal. Ramais sem hint vão pro estado "Desconhecido" (cinza) na UI.
+
 ## [0.2.0] — 2026-05-20
 
 ### Adicionado

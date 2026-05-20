@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.2.0"
+readonly SCRIPT_VERSION="0.3.0"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -340,6 +340,32 @@ php_set_api_key() {
     ok "RAD_API_KEY gravada no PHP."
 }
 
+# Grava credenciais AMI no PHP (ADR-0215) pra coleta de BLF/presença.
+# Sem isso, AMI_USER fica '' e o PHP pula a coleta — lista de contatos
+# funciona mas sem campo `presence`.
+#
+# A senha AMI é gravada como constante PHP (mode 640 protege; mesmo
+# user/group do PHP). Não é ideal em termos de "secrets-management",
+# mas Issabel não tem solução melhor sem dependência externa, e AMI
+# fica restrito a 127.0.0.1 mesmo (config no manager.conf).
+php_set_ami_creds() {
+    local php_file="$1" ami_user="$2" ami_secret="$3"
+    # Escape de chars que mexem com sed delim '|': nenhum em user/secret
+    # gerado pelo nosso openssl rand. User é alfanumérico simples.
+    # Defensivo: se usuário cole secret com '|', escapamos.
+    local esc_secret="${ami_secret//|/\\|}"
+    sed -i.bak \
+        -e "s|^define('AMI_USER',.*|define('AMI_USER',       '${ami_user}');|" \
+        -e "s|^define('AMI_SECRET',.*|define('AMI_SECRET',     '${esc_secret}');|" \
+        "${php_file}"
+    rm -f "${php_file}.bak"
+    if ! grep -qE "^define\('AMI_USER', *'${ami_user}'\);" "${php_file}"; then
+        warn "Falha ao gravar AMI_USER no PHP — BLF/presença não vai funcionar até corrigir manualmente."
+        return
+    fi
+    ok "AMI_USER e AMI_SECRET gravados no PHP (BLF habilitado)."
+}
+
 # ════════════════════════════════════════════════════════════════════════
 #  Manipulação segura do manager.conf
 # ════════════════════════════════════════════════════════════════════════
@@ -516,6 +542,11 @@ EOF
             warn "Guarde essa senha agora — ela não será exibida de novo."
         fi
         manager_add_user "${ami_user}" "${ami_secret}"
+
+        # Grava as MESMAS credenciais no PHP (ADR-0215) pra que o
+        # rad-contacts.php colete BLF/presença via AMI local. Sem isso,
+        # listagem de contatos funciona mas sem campo `presence`.
+        php_set_ami_creds "${INSTALL_PATH}" "${ami_user}" "${ami_secret}"
 
         # Reload do manager
         info "Recarregando manager do Asterisk…"
