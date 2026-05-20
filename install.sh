@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.1.0"
+readonly SCRIPT_VERSION="0.1.2"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -625,6 +625,19 @@ EOF
 # ════════════════════════════════════════════════════════════════════════
 
 main() {
+    # Quando rodado via `curl ... | sudo bash`, o stdin do bash É o pipe do
+    # curl — todos os `read` recebem EOF imediato e a UI quebra (menu sai
+    # silenciosamente porque o case cai no padrão vazio que faz exit 0).
+    # Solução: se stdin não é tty, reanexa o terminal de controle.
+    # No-op quando rodado como `./install.sh` (stdin já é tty).
+    if [[ ! -t 0 ]]; then
+        if [[ -r /dev/tty ]]; then
+            exec </dev/tty
+        else
+            die "Sem terminal interativo (stdin não é tty e /dev/tty inacessível). Baixe e rode com 'wget && sudo ./install.sh' em vez de 'curl | sudo bash'."
+        fi
+    fi
+
     _log_init
     preflight
     show_menu

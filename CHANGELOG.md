@@ -2,6 +2,13 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] — 2026-05-20
+
+### Corrigido
+
+- **Menu sai silenciosamente quando o script é executado via `curl ... | sudo bash`** (one-liner do README). Causa: o pipe do curl ocupa o stdin do bash, então o `read -r -p "Escolha uma opção:"` recebe EOF imediato e o `case` cai no padrão vazio (`""`), que faz `exit 0` por design. Fix: detecta `[[ ! -t 0 ]]` no início do `main()` e reanexa `/dev/tty` via `exec </dev/tty`. No-op quando o script roda como `./install.sh` (stdin já é tty). Mensagem de erro clara se `/dev/tty` for inacessível (ex.: containers sem TTY alocado).
+- **Banner mostrava `versão 0.1.0`** mesmo no release v0.1.1 — `SCRIPT_VERSION` não havia sido bumpado junto com as outras mudanças. Agora reflete a versão corrente.
+
 ## [0.1.1] — 2026-05-20
 
 ### Corrigido
