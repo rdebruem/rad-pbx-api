@@ -8,9 +8,22 @@ Instalador interativo de componentes do ecossistema **RAD** no servidor **Issabe
 
 Um único script `install.sh` apresenta um menu com componentes que podem ser provisionados na Issabel:
 
-1. **API de contatos** (`rad-contacts.php`) — endpoint HTTP que o RAD Softphone consome pra puxar a lista de ramais. Decidido em [ADR-0209](https://github.com/rdebruem/rad-ecosystem/blob/main/vault/04-ARCHITECTURE/adrs/ADR-0209-softphone-contacts-http-vs-ami.md) (repo privado).
+1. **API de contatos** (`rad-contacts.php`) — endpoint HTTP que o RAD Softphone consome pra puxar a lista de ramais. Decidido em [ADR-0209](https://github.com/rdebruem/rad-ecosystem/blob/main/vault/04-ARCHITECTURE/adrs/ADR-0209-softphone-contacts-http-vs-ami.md) e estendido em [ADR-0214](https://github.com/rdebruem/rad-ecosystem/blob/main/vault/04-ARCHITECTURE/adrs/ADR-0214-softphone-contacts-http-auth.md) (auth com SIP credentials — repo privado).
 
 Mais componentes entram conforme o ecossistema cresce.
+
+## UX zero-friction (v0.2.0+)
+
+A partir da v0.2.0 do endpoint, o **usuário final do RAD Softphone NÃO PRECISA receber API key alguma**. O onboarding é:
+
+1. Operador abre o app → Configurações → Conta SIP
+2. Preenche **ramal**, **senha SIP** e **IP/domínio** da central (dados que ele já tem)
+3. Marca o checkbox **☑ "Sincronizar contatos com a central"**
+4. Salvar — pronto.
+
+A autenticação contra `rad-contacts.php` usa `Authorization: Basic base64(ramal:senha)` automaticamente. O servidor valida contra o `secret` do ramal no `sip_additional.conf`. Cada operador autentica como ele mesmo — sem chave compartilhada, sem fricção de admin.
+
+Quem precisa de **modo legacy (API key)** — admin, scripts CI, integrações externas — continua suportado via header `X-API-Key`. A API key gerada na instalação aparece no resumo final do script.
 
 ## Como usar
 

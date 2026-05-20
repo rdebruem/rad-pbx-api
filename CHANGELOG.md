@@ -2,6 +2,29 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-05-20
+
+### Adicionado
+
+- **Autenticação HTTP Basic com credenciais SIP** no `rad-contacts.php` (decisão canônica: [ADR-0214](https://github.com/rdebruem/rad-ecosystem) — repo privado). User final do RAD Softphone passa a NÃO PRECISAR de API key — basta marcar ☑ "Sincronizar contatos com a central" na seção da conta SIP do app. O cliente autentica usando `Authorization: Basic base64(ramal:senha)` e o servidor valida contra o `secret` que já está no `sip_additional.conf`.
+- O endpoint agora distingue dois modos de auth:
+  - **Modo basic** (default): exige HTTPS, autentica como o ramal SIP. Granular por usuário (cada operador autentica como ele mesmo, sem chave compartilhada).
+  - **Modo apikey** (retrocompat): caminho original do ADR-0209. Útil pra scripts CI, integrações externas, ambientes onde Basic Auth não cabe.
+- Mensagem final do instalador reformulada com 2 blocos distintos:
+  - **"Para o usuário final"** — explica o fluxo simples (não precisa API key).
+  - **"Para o admin / scripts CI"** — mostra a API key gerada (modo legacy/admin).
+
+### Mudado
+
+- Endpoint URL exibida no resumo final agora usa `https://` por default (era `http://`). Reflete a recomendação de HTTPS obrigatório quando em modo Basic.
+- Log do servidor agora aparece com prefixo `[rad-contacts]` em casos de falha de auth Basic — facilita filtragem.
+
+### Notas de segurança
+
+- **Senha SIP em Basic Auth viaja em base64 sob TLS**: não é criptografia, mas é equivalente à proteção do canal SIP-over-UDP (modelo de ameaça já aceito). HTTPS obrigatório no modo Basic — cliente e servidor recusam em HTTP puro (servidor retorna `426 Upgrade Required`).
+- **md5secret no Asterisk**: setups que armazenam senha como hash (raro em FreePBX/Issabel) não funcionam com modo Basic — o servidor responde 401 e o user precisa usar modo apikey via config avançada.
+- **Brute force**: configure rate limit no Apache (fail2ban / mod_evasive). Documentar em runbook posterior.
+
 ## [0.1.3] — 2026-05-20
 
 ### Corrigido

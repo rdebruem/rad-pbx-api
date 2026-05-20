@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.1.3"
+readonly SCRIPT_VERSION="0.2.0"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -595,8 +595,7 @@ EOF
 
 ${C_BOLD}${C_GREEN}═══ Instalação concluída ═══${C_RESET}
 
-  ${C_BOLD}Endpoint URL${C_RESET}:    http://$(hostname -I | awk '{print $1}')/rad-api/contacts.php
-  ${C_BOLD}API key${C_RESET}:         ${api_key}
+  ${C_BOLD}Endpoint URL${C_RESET}:    https://$(hostname -I | awk '{print $1}')/rad-api/contacts.php
   ${C_BOLD}Arquivo PHP${C_RESET}:     ${INSTALL_PATH}
   ${C_BOLD}Manager.conf${C_RESET}:    ${MANAGER_CONF}
 EOF
@@ -608,17 +607,38 @@ EOF
     fi
     cat <<EOF
 
-${C_BOLD}Próximos passos:${C_RESET}
+${C_BOLD}${C_GREEN}═══ Para o usuário final do RAD Softphone ═══${C_RESET}
 
-  1. No RAD Softphone → Configurações → "Fonte central de contatos (HTTP)":
-     • URL:     a URL acima
-     • API key: cole o hex acima
-     • Marque "Habilitar fonte central de contatos"
-     • Salve.
+  ${C_BOLD}Não é mais preciso compartilhar API key!${C_RESET} A partir do v0.2.0 do
+  endpoint (ADR-0214), a autenticação usa as credenciais SIP que o operador
+  já tem. Basta no app:
 
-  2. Pra HTTPS (recomendado): configure cert válido no Apache (Let's Encrypt).
+    ${C_BOLD}1.${C_RESET} Configurações → Conta SIP
+    ${C_BOLD}2.${C_RESET} Preencher ramal + senha + domínio (esta máquina, ${C_DIM}$(hostname -I | awk '{print $1}')${C_DIM})${C_RESET}
+    ${C_BOLD}3.${C_RESET} Marcar ☑ "Sincronizar contatos com a central"
+    ${C_BOLD}4.${C_RESET} Salvar e registrar.
 
-  3. Logs do endpoint em /var/log/httpd/access_log (ou apache2/access.log).
+  Não precisa colar API key, não precisa colar URL.
+
+${C_BOLD}═══ Para o admin / scripts CI ═══${C_RESET}
+
+  Se você precisa de auth via API key (legacy, scripts curl, integrações
+  externas), pode usar a chave gerada agora:
+
+  ${C_BOLD}API key (admin)${C_RESET}: ${api_key}
+  ${C_DIM}Guarde — não será mostrada de novo. No app, abra "Configuração
+  avançada de fonte de contatos" e preencha URL + API key.${C_RESET}
+
+${C_BOLD}Próximos passos operacionais:${C_RESET}
+
+  1. Configure cert TLS válido no Apache (Let's Encrypt) sempre que possível.
+     Sem cert válido, o app exige opt-in explícito no checkbox
+     "Aceitar certificado TLS auto-assinado".
+
+  2. Logs do endpoint:
+     • ${C_DIM}/var/log/httpd/access_log${C_RESET} — requests bem-sucedidas
+     • ${C_DIM}/var/log/httpd/error_log${C_RESET} + ${C_DIM}ssl_error_log${C_RESET} — falhas
+     • Auth Basic falha aparece como ${C_DIM}error_log:[rad-contacts] auth basic falhou: ramal=NNN${C_RESET}
 
 EOF
     _log_to_file "INSTALL OK: api_key=<redacted> ami_user=${ami_user}"
