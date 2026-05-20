@@ -25,25 +25,27 @@ Mais componentes entram conforme o ecossistema cresce.
 
 ### Execução
 
-**Opção 1 — direto via curl (one-liner):**
+**Opção 1 — baixa, inspeciona, executa (recomendado):**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rdebruem/RAD-PBX-API/main/install.sh | sudo bash
-```
-
-**Opção 2 — baixa, inspeciona, executa (recomendado):**
-
-```bash
-wget https://raw.githubusercontent.com/rdebruem/RAD-PBX-API/main/install.sh
+wget https://raw.githubusercontent.com/rdebruem/rad-pbx-api/main/install.sh
 chmod +x install.sh
 sudo ./install.sh
 ```
 
-**Opção 3 — token via env var (não interativo no prompt do token):**
+**Opção 2 — token via env var (skip prompt de token):**
 
 ```bash
 sudo GITHUB_TOKEN=ghp_xxxx ./install.sh
 ```
+
+**Opção 3 — one-liner via curl (caveat de TTY — ver nota abaixo):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rdebruem/rad-pbx-api/main/install.sh | sudo bash
+```
+
+> ⚠️ **Aviso sobre `curl|sudo bash`**: em algumas configurações de `sudo`/SSH, o stdin do bash fica preso ao pipe do curl e os `read` interativos pegam EOF — o menu sai silenciosamente. O script v0.1.3+ tenta reanexar `/dev/tty` automaticamente e mostra diagnóstico no startup; se mesmo assim falhar, ele aborta com mensagem clara apontando pra Opção 1. **Use Opção 1 como padrão**; reserve a 3 pra ambientes sem `wget`.
 
 ### O que o instalador faz (opção 1 — API de contatos)
 

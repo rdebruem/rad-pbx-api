@@ -2,6 +2,16 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] — 2026-05-20
+
+### Corrigido
+
+- **Menu ainda saía em `curl|sudo bash` mesmo após o `exec </dev/tty` da v0.1.2.** Causa: em algumas configurações de `sudo`/SSH o `exec </dev/tty` aparenta funcionar (`/dev/tty` é legível) mas não torna stdin um tty efetivo pros `read`. Aplicada defesa em camadas:
+  - Diagnóstico explícito no startup: imprime `[diagnóstico] stdin é tty? SIM/NÃO · /dev/tty acessível? SIM/NÃO` antes de qualquer interação.
+  - Belt-and-suspenders: cada `read` interativo (`prompt`, `prompt_secret`, `confirm`, menu) passa `</dev/tty` explicitamente como redirect.
+  - Caso `""` (input vazio) no menu agora aborta com mensagem clara apontando pra Opção 1 do README (`wget && sudo ./install.sh`), em vez de sair silenciosamente como se fosse `q`.
+- **README**: promovida Opção 1 (`wget && sudo ./install.sh`) ao topo como recomendada; `curl|bash` virou Opção 3 com aviso explícito sobre o caveat de TTY.
+
 ## [0.1.2] — 2026-05-20
 
 ### Corrigido

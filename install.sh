@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.1.2"
+readonly SCRIPT_VERSION="0.1.3"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -169,14 +169,20 @@ preflight() {
 #  Helpers de input do usuário
 # ════════════════════════════════════════════════════════════════════════
 
+# Todos os reads usam `</dev/tty` explicitamente — defesa em camadas pra o
+# caso de `curl|sudo bash` onde stdin do shell é o pipe do curl. O `exec
+# </dev/tty` no main() já deveria ter resolvido, mas em alguns sudos isso
+# falha silenciosamente; o `</dev/tty` em cada read garante. Se /dev/tty
+# não estiver acessível, o main() aborta antes desses reads serem chamados.
+
 # Prompt simples com default.  Uso: var=$(prompt "Pergunta" "default")
 prompt() {
     local question="$1" default="${2:-}" answer
     if [[ -n "${default}" ]]; then
-        read -r -p "${question} [${C_DIM}${default}${C_RESET}]: " answer
+        read -r -p "${question} [${C_DIM}${default}${C_RESET}]: " answer </dev/tty
         printf '%s' "${answer:-${default}}"
     else
-        read -r -p "${question}: " answer
+        read -r -p "${question}: " answer </dev/tty
         printf '%s' "${answer}"
     fi
 }
@@ -185,7 +191,7 @@ prompt() {
 prompt_secret() {
     local question="$1" answer
     # -s esconde o input; printf newline manualmente
-    read -r -s -p "${question}: " answer
+    read -r -s -p "${question}: " answer </dev/tty
     printf '\n' >&2
     printf '%s' "${answer}"
 }
@@ -193,7 +199,7 @@ prompt_secret() {
 # Confirma sim/não. Default: N (seguro). Uso: confirm "Continuar?" && ...
 confirm() {
     local question="$1" answer
-    read -r -p "${question} [s/N]: " answer
+    read -r -p "${question} [s/N]: " answer </dev/tty
     [[ "${answer,,}" =~ ^(s|sim|y|yes)$ ]]
 }
 
@@ -400,10 +406,11 @@ ${C_BOLD}Menu principal${C_RESET}
 
 EOF
     local choice
-    read -r -p "Escolha uma opção: " choice
+    read -r -p "Escolha uma opção: " choice </dev/tty
     case "${choice}" in
         1)  install_contacts_api ;;
-        q|Q|"") info "Saindo."; exit 0 ;;
+        q|Q) info "Saindo."; exit 0 ;;
+        "") warn "Input vazio (provavelmente stdin do bash não está atrelado ao terminal — curl|sudo bash em alguns sudos). Use: wget https://raw.githubusercontent.com/rdebruem/rad-pbx-api/main/install.sh && chmod +x install.sh && sudo ./install.sh"; exit 1 ;;
         *)  warn "Opção inválida: '${choice}'"; sleep 1; show_menu ;;
     esac
 }
@@ -625,16 +632,36 @@ EOF
 # ════════════════════════════════════════════════════════════════════════
 
 main() {
+    # ─── Diagnóstico de TTY (visível pro usuário) ───
     # Quando rodado via `curl ... | sudo bash`, o stdin do bash É o pipe do
-    # curl — todos os `read` recebem EOF imediato e a UI quebra (menu sai
-    # silenciosamente porque o case cai no padrão vazio que faz exit 0).
-    # Solução: se stdin não é tty, reanexa o terminal de controle.
-    # No-op quando rodado como `./install.sh` (stdin já é tty).
-    if [[ ! -t 0 ]]; then
-        if [[ -r /dev/tty ]]; then
+    # curl — todos os `read` recebem EOF imediato. Tentamos:
+    #   1. Detectar via [[ -t 0 ]] se stdin é tty
+    #   2. Se não, e /dev/tty está acessível, reanexar via exec </dev/tty
+    #   3. Belt-and-suspenders: cada read individual também faz </dev/tty
+    #   4. Se nenhum dos dois funcionar, mensagem clara apontando wget
+    local stdin_is_tty="NAO" tty_dev_readable="NAO"
+    [[ -t 0 ]] && stdin_is_tty="SIM"
+    [[ -r /dev/tty ]] && tty_dev_readable="SIM"
+
+    printf '%s\n' "${C_DIM}[diagnóstico] stdin é tty? ${stdin_is_tty} · /dev/tty acessível? ${tty_dev_readable}${C_RESET}"
+
+    if [[ "${stdin_is_tty}" == "NAO" ]]; then
+        if [[ "${tty_dev_readable}" == "SIM" ]]; then
+            printf '%s\n' "${C_DIM}[diagnóstico] reanexando /dev/tty via exec…${C_RESET}"
             exec </dev/tty
+            if [[ -t 0 ]]; then
+                printf '%s\n' "${C_DIM}[diagnóstico] reanexar OK — stdin agora é tty.${C_RESET}"
+            else
+                printf '%s\n' "${C_DIM}[diagnóstico] exec não tornou stdin tty — usando </dev/tty em cada read individualmente.${C_RESET}"
+            fi
         else
-            die "Sem terminal interativo (stdin não é tty e /dev/tty inacessível). Baixe e rode com 'wget && sudo ./install.sh' em vez de 'curl | sudo bash'."
+            printf '%s\n' "${C_RED}✗${C_RESET} Sem terminal interativo (stdin não é tty e /dev/tty inacessível)." >&2
+            printf '%s\n' "" >&2
+            printf '%s\n' "Baixe e rode com:" >&2
+            printf '%s\n' "  wget https://raw.githubusercontent.com/rdebruem/rad-pbx-api/main/install.sh" >&2
+            printf '%s\n' "  chmod +x install.sh" >&2
+            printf '%s\n' "  sudo ./install.sh" >&2
+            exit 1
         fi
     fi
 
