@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.3.0"
+readonly SCRIPT_VERSION="0.3.2"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -47,6 +47,13 @@ readonly INSTALL_MODE_PERMISSIVE="644"    # world-readable (fallback ionCube)
 readonly MANAGER_CONF="/etc/asterisk/manager.conf"
 readonly AMI_USER_DEFAULT="rad-localhost"
 readonly AMI_READ_PERMS="system,call,user,reporting"
+# write=command é OBRIGATÓRIO pro Action:Command funcionar — o PHP usa
+# Action:Command "core show hints" como fallback de BLF em Asterisk <13.7
+# (Issabel típico). Sem isso, AMI responde "Permission denied" e nenhum
+# hint é coletado. system,call adicionados pra preparação futura (Originate,
+# Reload em pipelines admin). User fica restrito a 127.0.0.1 via permit/deny,
+# então a superfície de risco continua nula em deployments típicos.
+readonly AMI_WRITE_PERMS="command,system,call"
 
 # Log centralizado — todo output do script é também tee'd pra cá.
 readonly LOG_DIR="/var/log"
@@ -393,7 +400,7 @@ manager_add_user() {
         printf 'deny = 0.0.0.0/0\n'
         printf 'permit = 127.0.0.1/255.255.255.255\n'
         printf 'read = %s\n' "${AMI_READ_PERMS}"
-        printf 'write =\n'
+        printf 'write = %s\n' "${AMI_WRITE_PERMS}"
     } >> "${MANAGER_CONF}"
 
     ok "Seção [${user}] adicionada em ${MANAGER_CONF}."
@@ -561,7 +568,9 @@ EOF
         local show_output
         if show_output=$(asterisk -rx "manager show user ${ami_user}" 2>&1); then
             printf '%s\n' "${show_output}"
-            if printf '%s' "${show_output}" | grep -qE "Read perm:.*${AMI_READ_PERMS//,/.*}"; then
+            # case-insensitive: Asterisk às vezes retorna 'read perm' (minúsculo)
+            # — o regex case-sensitive antigo dava falso warn mesmo com perms OK.
+            if printf '%s' "${show_output}" | grep -qiE "read perm:.*${AMI_READ_PERMS//,/.*}"; then
                 ok "Usuário AMI provisionado corretamente."
             else
                 warn "Usuário criado mas read perm não parece estar completo. Confira a saída acima."
@@ -600,7 +609,7 @@ EOF
 
     if [[ ${curl_status} -ne 0 ]]; then
         warn "curl falhou completamente (status=${curl_status})."
-    elif [[ "${http_status}" == "200" ]] && printf '%s' "${curl_output}" | grep -q '"format":"rad-contacts-v1"'; then
+    elif [[ "${http_status}" == "200" ]] && printf '%s' "${curl_output}" | grep -qE '"format"[[:space:]]*:[[:space:]]*"rad-contacts-v1"'; then
         ok "Endpoint respondeu HTTP 200 no formato esperado (mode final ${php_mode_final})."
         if command -v python3 >/dev/null 2>&1; then
             printf '%s' "${curl_output}" | python3 -m json.tool | head -20 || true

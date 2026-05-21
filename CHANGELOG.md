@@ -2,6 +2,24 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] — 2026-05-20
+
+### Corrigido
+
+- **`write = command,system,call`** na seção AMI do `manager.conf` — antes ficava vazio e bloqueava `Action: Command`, necessário pelo fallback `core show hints` em Asterisk < 13.7 (caso típico do Issabel). Sintoma sem o fix: AMI loga "Permission denied" no `ActionID: hints-*` e nenhum hint é coletado — endpoint retorna `presence` vazio mesmo com `amiOk: true`.
+- O usuário AMI continua restrito a `127.0.0.1` via `permit`/`deny`, então a superfície de risco com o write expandido permanece **zero** em deployments típicos (AMI nunca exposto ao cliente).
+
+Identificado no segundo deploy real em Asterisk 11.25.3 + Issabel — `Response: Error / Message: Permission denied` aparecia no dump bruto do socket AMI.
+
+## [0.3.1] — 2026-05-20
+
+### Corrigido
+
+- **Regex case-sensitive em `manager show user`** dava falso warn "read perm não parece estar completo" mesmo quando o usuário AMI estava configurado certinho. Causa: o `asterisk -rx "manager show user X"` às vezes retorna `read perm:` (minúsculo) e o `grep -qE "Read perm:"` (maiúsculo) não batia. Fix: `grep -qiE` (case-insensitive).
+- **Regex do JSON `format` falhava com pretty-print**: o PHP serializa com `JSON_PRETTY_PRINT` (espaço após `:`), o instalador procurava `"format":"rad-contacts-v1"` sem espaço. Resultado: endpoint HTTP 200 com body correto era reportado como warn "Endpoint respondeu HTTP 200. Inspecione...". Fix: regex `"format"[[:space:]]*:[[:space:]]*"rad-contacts-v1"` aceita pretty e compacto.
+
+Ambos são bugs cosméticos no diagnóstico final do install.sh — não afetam funcionamento, mas davam impressão errada de "instalação com problemas" quando estava tudo OK.
+
 ## [0.3.0] — 2026-05-20
 
 ### Adicionado
