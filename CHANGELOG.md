@@ -2,6 +2,27 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-05-25
+
+### Adicionado
+
+- **Opção 2 no menu — Instalar áudios PT-BR (módulo Issabel PBX PT-BR)**. Nova entrada que executa o script `patch-issabelbr.sh` mantido pelo projeto `ibinetwork/IssabelBR` no GitHub, copiando áudios em português brasileiro pra central Issabel (URAs, prompts de voicemail, sons do sistema). Função `install_ptbr_audios()` em `install.sh`.
+  - Aviso explícito de que o script é mantido por terceiros e roda como root, com `confirm()` obrigatório antes de baixar/executar.
+  - Pre-flight `require_cmd wget` + `require_cmd bash`.
+  - Executa exatamente o comando documentado pelo upstream: `wget -O - https://github.com/ibinetwork/IssabelBR/raw/master/patch-issabelbr.sh | bash`.
+  - Captura exit code via `PIPESTATUS[1]` (sem deixar a falha do patch matar o instalador via `set -e`) e loga sucesso/falha no `LOG_FILE`.
+  - Sugestão de pós-instalação (`asterisk -rx "core reload"` + teste de URA pra confirmar prompts em PT-BR).
+- Constante `PTBR_PATCH_URL` no topo da seção pra facilitar troca da fonte se o upstream mover.
+
+### Mudado
+
+- `install.sh` v0.4.0 — feature nova (segunda opção do menu), bump minor.
+
+### Notas
+
+- O patch upstream toca em arquivos do Asterisk (`/var/lib/asterisk/sounds/`) — recomenda-se snapshot/backup do servidor antes de aplicar em produção. O instalador NÃO faz esse backup por padrão; isso fica a critério do operador.
+- Como o script é externo ao repo `rad-pbx-api`, mudanças no upstream são herdadas automaticamente. Se desejar pin de versão, baixe o `.sh` pra um espelho próprio e ajuste `PTBR_PATCH_URL`.
+
 ## [0.3.2] — 2026-05-20
 
 ### Corrigido
