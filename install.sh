@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.5.2"
+readonly SCRIPT_VERSION="0.5.3"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -57,6 +57,7 @@ readonly THEME_REPO_BRANCH="main"
 readonly THEME_PATH_IN_REPO="www/html/themes/rad_pbx"
 readonly MOTD_PATH_IN_REPO="usr/local/sbin/motd.sh"
 readonly FAVICON_PATH_IN_REPO="www/html/favicon.ico"
+readonly BRLANG_PATH_IN_REPO="www/html/lang/br.lang"
 
 # Caminhos de destino no servidor Issabel.
 # /var/www/html/themes/... é o layout padrão do Issabel pra temas.
@@ -68,6 +69,11 @@ readonly MOTD_INSTALL_PATH="/usr/local/sbin/motd.sh"
 # de fábrica no Issabel).
 readonly FAVICON_INSTALL_PATH="/var/www/html/favicon.ico"
 readonly FAVICON_INSTALL_MODE="644"
+# br.lang fica em /var/www/html/lang/ junto com os outros .lang do Issabel
+# (en.lang, es.lang, pt-br.lang etc.). Mesmas permissões: apache_owner +
+# mode 644.
+readonly BRLANG_INSTALL_PATH="/var/www/html/lang/br.lang"
+readonly BRLANG_INSTALL_MODE="644"
 # motd.sh é executado pelo PAM em cada login SSH (via pam_exec) — precisa
 # ser executável por todos (-rwxr-xr-x = 755) e owner root:root pra evitar
 # que usuários menos privilegiados sobrescrevam o banner do sistema.
@@ -870,6 +876,7 @@ ${C_BOLD}${THEME_REPO_OWNER}/${THEME_REPO_NAME}${C_RESET} (branch ${THEME_REPO_B
 
   ${C_DIM}• ${THEME_PATH_IN_REPO}/  →  ${THEME_INSTALL_DIR}/${C_RESET}
   ${C_DIM}• ${FAVICON_PATH_IN_REPO}        →  ${FAVICON_INSTALL_PATH}${C_RESET}
+  ${C_DIM}• ${BRLANG_PATH_IN_REPO}       →  ${BRLANG_INSTALL_PATH}${C_RESET}
   ${C_DIM}• ${MOTD_PATH_IN_REPO}        →  ${MOTD_INSTALL_PATH}${C_RESET}
 
 Arquivos existentes serão renomeados pra .bak.<timestamp> antes da cópia.
@@ -933,6 +940,7 @@ EOF
     local src_theme_dir="${extracted_root}/${THEME_PATH_IN_REPO}"
     local src_motd_file="${extracted_root}/${MOTD_PATH_IN_REPO}"
     local src_favicon_file="${extracted_root}/${FAVICON_PATH_IN_REPO}"
+    local src_brlang_file="${extracted_root}/${BRLANG_PATH_IN_REPO}"
 
     # ─── 3.4  Validar que os paths esperados existem no tarball ───
     if [[ ! -d "${src_theme_dir}" ]]; then
@@ -944,7 +952,10 @@ EOF
     if [[ ! -f "${src_favicon_file}" ]]; then
         die "Arquivo '${FAVICON_PATH_IN_REPO}' não encontrado no repo. Estrutura do repo mudou?"
     fi
-    ok "Estrutura do repo validada — encontrados theme/, favicon.ico e motd.sh."
+    if [[ ! -f "${src_brlang_file}" ]]; then
+        die "Arquivo '${BRLANG_PATH_IN_REPO}' não encontrado no repo. Estrutura do repo mudou?"
+    fi
+    ok "Estrutura do repo validada — encontrados theme/, favicon.ico, br.lang e motd.sh."
 
     # ─── 3.5  Backup + instalação do tema ───
     if [[ -d "${THEME_INSTALL_DIR}" ]]; then
@@ -1005,7 +1016,33 @@ EOF
         restorecon -v "${FAVICON_INSTALL_PATH}" >/dev/null 2>&1 || true
     fi
 
-    # ─── 3.7  Backup + instalação do motd.sh ───
+    # ─── 3.7  Backup + instalação do br.lang ───
+    # Vai junto com os outros .lang de fábrica do Issabel em /var/www/html/lang/.
+    # Mesma fórmula do favicon: backup datado, apache_owner, mode 644, SELinux.
+    # Defensivo: se /var/www/html/lang/ não existir (Issabel modificado), cria.
+    if [[ -f "${BRLANG_INSTALL_PATH}" ]]; then
+        local brlang_backup="${BRLANG_INSTALL_PATH}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+        info "br.lang existente detectado — backup em ${brlang_backup}…"
+        cp -p "${BRLANG_INSTALL_PATH}" "${brlang_backup}" \
+            || die "Falha ao fazer backup de ${BRLANG_INSTALL_PATH}."
+        ok "Backup do br.lang antigo: ${brlang_backup}"
+    fi
+
+    info "Instalando ${BRLANG_INSTALL_PATH}…"
+    mkdir -p "$(dirname "${BRLANG_INSTALL_PATH}")"
+    cp -p "${src_brlang_file}" "${BRLANG_INSTALL_PATH}" \
+        || die "Falha ao copiar br.lang pra ${BRLANG_INSTALL_PATH}."
+    chown "${apache_owner}" "${BRLANG_INSTALL_PATH}" \
+        || warn "Falha ao definir owner ${apache_owner} em ${BRLANG_INSTALL_PATH}."
+    chmod "${BRLANG_INSTALL_MODE}" "${BRLANG_INSTALL_PATH}" \
+        || die "Falha ao definir modo ${BRLANG_INSTALL_MODE} em ${BRLANG_INSTALL_PATH}."
+    ok "br.lang instalado (owner ${apache_owner}, modo ${BRLANG_INSTALL_MODE})."
+
+    if command -v restorecon >/dev/null 2>&1; then
+        restorecon -v "${BRLANG_INSTALL_PATH}" >/dev/null 2>&1 || true
+    fi
+
+    # ─── 3.8  Backup + instalação do motd.sh ───
     if [[ -f "${MOTD_INSTALL_PATH}" ]]; then
         local motd_backup="${MOTD_INSTALL_PATH}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
         info "motd.sh existente detectado — backup em ${motd_backup}…"
@@ -1042,13 +1079,14 @@ EOF
     rm -rf "${tmp_tar}" "${tmp_extract}"
     trap - EXIT
 
-    # ─── 3.8  Resumo final ───
+    # ─── 3.9  Resumo final ───
     cat <<EOF
 
 ${C_BOLD}${C_GREEN}═══ Tema RAD-PBX instalado ═══${C_RESET}
 
   ${C_BOLD}Tema${C_RESET}:        ${THEME_INSTALL_DIR}
   ${C_BOLD}favicon.ico${C_RESET}: ${FAVICON_INSTALL_PATH}  ${C_DIM}(${FAVICON_INSTALL_MODE} ${apache_owner})${C_RESET}
+  ${C_BOLD}br.lang${C_RESET}:     ${BRLANG_INSTALL_PATH}  ${C_DIM}(${BRLANG_INSTALL_MODE} ${apache_owner})${C_RESET}
   ${C_BOLD}motd.sh${C_RESET}:     ${MOTD_INSTALL_PATH}  ${C_DIM}(${MOTD_INSTALL_MODE} ${MOTD_INSTALL_OWNER})${C_RESET}
 
 ${C_BOLD}Próximos passos sugeridos:${C_RESET}

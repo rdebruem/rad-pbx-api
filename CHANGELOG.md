@@ -2,6 +2,20 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.5.3] — 2026-05-25
+
+### Adicionado
+
+- **`br.lang` instalado pela opção 3**. A função `install_rad_pbx_theme()` agora copia também `www/html/lang/br.lang` do repo do tema para `/var/www/html/lang/br.lang` no servidor, sobrescrevendo o arquivo de idioma do Issabel. Aplica:
+  - Owner = mesmo `apache_owner` detectado pra pasta do tema (em Issabel padrão = `asterisk:asterisk`).
+  - Mode `644` — alinhado com os outros `.lang` de fábrica do Issabel (`en.lang`, `es.lang`, `pt-br.lang` etc.).
+  - Backup `${BRLANG_INSTALL_PATH}.bak.<UTC-timestamp>` do arquivo existente antes de sobrescrever.
+  - `mkdir -p` defensivo pro diretório `/var/www/html/lang/` caso ele não exista (Issabel modificado).
+  - `restorecon -v` no arquivo (no-op se SELinux disabled).
+- Constantes `BRLANG_PATH_IN_REPO`, `BRLANG_INSTALL_PATH` e `BRLANG_INSTALL_MODE` no topo do `install.sh`.
+- Validação no extract: se `www/html/lang/br.lang` não existir no tarball baixado, o instalador aborta com mensagem clara antes de tocar em qualquer coisa do sistema (mesma estratégia atômica usada pro tema, favicon e motd).
+- `install.sh` v0.5.3 — patch (artefato novo no pipeline de instalação do tema, sem mudança de contrato).
+
 ## [0.5.2] — 2026-05-25
 
 ### Adicionado
