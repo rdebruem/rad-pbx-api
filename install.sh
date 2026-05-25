@@ -47,7 +47,7 @@ readonly INSTALL_MODE_PERMISSIVE="644"    # world-readable (fallback ionCube)
 # Mantido separado do rad-ecosystem porque o tema tem ciclo de release
 # independente e é versionado por designer, não por engenharia.
 readonly THEME_REPO_OWNER="rdebruem"
-readonly THEME_REPO_NAME="rad_pbx-theme"
+readonly THEME_REPO_NAME="rad-pbx-theme"
 readonly THEME_REPO_BRANCH="main"
 
 # Caminhos DENTRO do repo do tema (relativos à raiz).
@@ -886,8 +886,8 @@ EOF
         "o tema rad_pbx")
 
     # ─── 3.2  Baixar tarball do repo privado ───
-    local tmp_tar="/tmp/rad_pbx-theme.$$.tar.gz"
-    local tmp_extract="/tmp/rad_pbx-theme-extract.$$"
+    local tmp_tar="/tmp/rad-pbx-theme.$$.tar.gz"
+    local tmp_extract="/tmp/rad-pbx-theme-extract.$$"
     # Cleanup automático em qualquer saída — falha de rede, Ctrl+C, etc.
     # Mantemos pasta de extração só até o final do install; cleanup remove tudo.
     trap 'rm -rf "${tmp_tar}" "${tmp_extract}"' EXIT
