@@ -10,14 +10,23 @@ Um único script `install.sh` apresenta um menu com componentes que podem ser pr
 
 1. **API de contatos** — endpoint HTTP que o RAD Softphone consome pra puxar a lista de ramais da central.
 2. **Áudios PT-BR** — aplica o patch da comunidade [ibinetwork/IssabelBR](https://github.com/ibinetwork/IssabelBR) (prompts de URA, voicemail e sons do sistema em português brasileiro).
+3. **Tema RAD-PBX** — baixa o tema do repositório privado `rdebruem/rad-pbx-theme` e instala em `/var/www/html/themes/rad-pbx/`, substituindo também o `/usr/local/sbin/motd.sh` (banner SSH) com permissões `-rwxr-xr-x root:root`.
 
 Mais opções entram conforme o ecossistema cresce.
 
 ## Pré-requisitos
 
-- Servidor **Issabel** (ou Asterisk equivalente) com `bash 4+`, `curl`, `wget`, `openssl` e `asterisk` CLI.
+- Servidor **Issabel** (ou Asterisk equivalente) com `bash 4+`, `curl`, `wget`, `openssl`, `tar` e `asterisk` CLI.
 - Acesso `root` (ou `sudo`).
-- Para a opção 1 (API de contatos): **token de acesso** ao repositório privado do projeto. Solicite ao mantenedor.
+- Para a opção 1 (API de contatos): **token de acesso** ao repositório privado `rdebruem/rad-ecosystem`. Solicite ao mantenedor.
+- Para a opção 3 (Tema RAD-PBX): **token de acesso** ao repositório privado `rdebruem/rad-pbx-theme`. O mesmo `GITHUB_TOKEN` pode ser reusado entre opções 1 e 3 se o PAT tiver escopo nos dois repos.
+
+### Criando o GitHub PAT (fine-grained, recomendado)
+
+1. Acesse https://github.com/settings/personal-access-tokens/new.
+2. **Repository access**: marque "Only select repositories" e selecione o(s) repo(s) que você precisa (`rad-ecosystem` para opção 1, `rad-pbx-theme` para opção 3).
+3. **Repository permissions**: marque `Contents: Read-only`.
+4. Gere e copie o token (`github_pat_...`) — o GitHub não mostra de novo.
 
 ## Como usar
 

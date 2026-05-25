@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.4.0"
+readonly SCRIPT_VERSION="0.5.0"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -42,6 +42,27 @@ readonly INSTALL_PATH="${INSTALL_DIR}/${INSTALL_FILE_NAME}"
 # via /etc/httpd/conf.d/issabel.conf, e outras distros podem variar.
 readonly INSTALL_MODE_RESTRICTIVE="640"   # apache só (mais seguro)
 readonly INSTALL_MODE_PERMISSIVE="644"    # world-readable (fallback ionCube)
+
+# Repo PRIVADO do tema RAD-PBX (opção 3 do menu).
+# Mantido separado do rad-ecosystem porque o tema tem ciclo de release
+# independente e é versionado por designer, não por engenharia.
+readonly THEME_REPO_OWNER="rdebruem"
+readonly THEME_REPO_NAME="rad-pbx-theme"
+readonly THEME_REPO_BRANCH="main"
+
+# Caminhos DENTRO do repo do tema (relativos à raiz).
+readonly THEME_PATH_IN_REPO="www/html/themes/rad-pbx"
+readonly MOTD_PATH_IN_REPO="usr/local/sbin/motd.sh"
+
+# Caminhos de destino no servidor Issabel.
+# /var/www/html/themes/... é o layout padrão do Issabel pra temas.
+readonly THEME_INSTALL_DIR="/var/www/html/themes/rad-pbx"
+readonly MOTD_INSTALL_PATH="/usr/local/sbin/motd.sh"
+# motd.sh é executado pelo PAM em cada login SSH (via pam_exec) — precisa
+# ser executável por todos (-rwxr-xr-x = 755) e owner root:root pra evitar
+# que usuários menos privilegiados sobrescrevam o banner do sistema.
+readonly MOTD_INSTALL_MODE="755"
+readonly MOTD_INSTALL_OWNER="root:root"
 
 # Asterisk Manager Interface.
 readonly MANAGER_CONF="/etc/asterisk/manager.conf"
@@ -215,7 +236,15 @@ confirm() {
 # ════════════════════════════════════════════════════════════════════════
 
 # Lê o GitHub token: da env GITHUB_TOKEN (pref), ou pergunta interativamente.
+#   $1 = owner do repo (ex: rdebruem)              [obrigatório no prompt interativo]
+#   $2 = nome do repo (ex: rad-ecosystem)          [obrigatório no prompt interativo]
+#   $3 = descrição curta do artefato a baixar      [opcional, default genérico]
+# Mesmo token serve pra múltiplos repos se o PAT tiver escopo amplo o suficiente;
+# por isso GITHUB_TOKEN é honrado independente do repo.
 get_github_token() {
+    local owner="${1:-${SOURCE_REPO_OWNER_DEFAULT}}"
+    local repo="${2:-${SOURCE_REPO_NAME_DEFAULT}}"
+    local artifact_desc="${3:-os artefatos}"
     local token="${GITHUB_TOKEN:-}"
     if [[ -n "${token}" ]]; then
         info "Usando GITHUB_TOKEN da variável de ambiente."
@@ -228,7 +257,7 @@ get_github_token() {
 ${C_BOLD}Token do GitHub${C_RESET}
 ─────────────────────────
 O instalador precisa de um token (PAT) com permissão de leitura no repo
-privado ${C_BOLD}${SOURCE_REPO_OWNER_DEFAULT}/${SOURCE_REPO_NAME_DEFAULT}${C_RESET} pra baixar o rad-contacts.php.
+privado ${C_BOLD}${owner}/${repo}${C_RESET} pra baixar ${artifact_desc}.
 
 Crie um em:  https://github.com/settings/tokens
 Escopo mínimo:
@@ -247,13 +276,16 @@ EOF
 
 # Baixa um arquivo do repo privado via GitHub Contents API com raw accept.
 #   $1 = github token
-#   $2 = path no repo (ex: apps/rad-softphone/server/issabel/rad-contacts.php)
-#   $3 = destino local
+#   $2 = owner do repo
+#   $3 = nome do repo
+#   $4 = branch
+#   $5 = path no repo (ex: apps/rad-softphone/server/issabel/rad-contacts.php)
+#   $6 = destino local
 github_download_file() {
-    local token="$1" repo_path="$2" dest="$3"
-    local url="https://api.github.com/repos/${SOURCE_REPO_OWNER_DEFAULT}/${SOURCE_REPO_NAME_DEFAULT}/contents/${repo_path}?ref=${SOURCE_REPO_BRANCH}"
+    local token="$1" owner="$2" repo="$3" branch="$4" repo_path="$5" dest="$6"
+    local url="https://api.github.com/repos/${owner}/${repo}/contents/${repo_path}?ref=${branch}"
 
-    info "Baixando ${repo_path} (branch ${SOURCE_REPO_BRANCH})…"
+    info "Baixando ${repo_path} de ${owner}/${repo}@${branch}…"
     local http_code
     http_code=$(curl -sS \
         -H "Authorization: Bearer ${token}" \
@@ -270,6 +302,45 @@ github_download_file() {
         403) die "GitHub HTTP 403 — token sem permissão pra esse repo, ou rate limit." ;;
         404) die "GitHub HTTP 404 — caminho '${repo_path}' não existe no repo (ou repo errado)." ;;
         *)   die "GitHub HTTP ${http_code} — erro inesperado. Veja ${dest} pra body bruto." ;;
+    esac
+}
+
+# Baixa o tarball completo de um repo privado via GitHub API.
+# Mais eficiente que Contents API quando precisamos de uma pasta inteira
+# (ex.: tema rad-pbx tem centenas de imagens — file-by-file estouraria o
+# rate limit e demoraria minutos).
+#   $1 = github token
+#   $2 = owner do repo
+#   $3 = nome do repo
+#   $4 = ref (branch ou tag — ex.: "main", "v1.2.0")
+#   $5 = destino local (ex.: /tmp/foo.tar.gz)
+#
+# Observações importantes:
+#   - Endpoint /tarball/{ref} retorna 302 → S3; -L é OBRIGATÓRIO.
+#   - O tarball expande pra um diretório com nome tipo
+#     ${owner}-${repo}-${commit_sha_curto}/ — o caller precisa
+#     resolver isso (use `tar tzf` ou `find` no diretório de extração).
+github_download_tarball() {
+    local token="$1" owner="$2" repo="$3" ref="$4" dest="$5"
+    local url="https://api.github.com/repos/${owner}/${repo}/tarball/${ref}"
+
+    info "Baixando tarball de ${owner}/${repo}@${ref}…"
+    local http_code
+    http_code=$(curl -sSL \
+        -H "Authorization: Bearer ${token}" \
+        -H "Accept: application/vnd.github+json" \
+        -H "User-Agent: ${SCRIPT_NAME}/${SCRIPT_VERSION}" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        -o "${dest}" \
+        -w "%{http_code}" \
+        "${url}")
+
+    case "${http_code}" in
+        200) ok "Tarball baixado (HTTP 200, $(wc -c < "${dest}" | tr -d ' ') bytes)." ;;
+        401) die "GitHub HTTP 401 — token inválido ou expirado." ;;
+        403) die "GitHub HTTP 403 — token sem permissão pra esse repo, ou rate limit." ;;
+        404) die "GitHub HTTP 404 — repo '${owner}/${repo}' ou ref '${ref}' não existe." ;;
+        *)   die "GitHub HTTP ${http_code} — erro inesperado ao baixar tarball." ;;
     esac
 }
 
@@ -438,6 +509,10 @@ ${C_BOLD}Menu principal${C_RESET}
   ${C_BOLD}2${C_RESET})  Instalar áudios PT-BR (módulo Issabel PBX PT-BR)
        └─ baixa e aplica o patch ibinetwork/IssabelBR (áudios em português).
 
+  ${C_BOLD}3${C_RESET})  Instalar Tema RAD-PBX
+       └─ baixa o tema do repo privado ${THEME_REPO_OWNER}/${THEME_REPO_NAME} e
+          substitui /var/www/html/themes/rad-pbx/ + /usr/local/sbin/motd.sh.
+
   ${C_BOLD}q${C_RESET})  Sair
 
 EOF
@@ -446,6 +521,7 @@ EOF
     case "${choice}" in
         1)  install_contacts_api ;;
         2)  install_ptbr_audios ;;
+        3)  install_rad_pbx_theme ;;
         q|Q) info "Saindo."; exit 0 ;;
         "") warn "Input vazio (provavelmente stdin do bash não está atrelado ao terminal — curl|sudo bash em alguns sudos). Use: wget https://raw.githubusercontent.com/rdebruem/rad-pbx-api/main/install.sh && chmod +x install.sh && sudo ./install.sh"; exit 1 ;;
         *)  warn "Opção inválida: '${choice}'"; sleep 1; show_menu ;;
@@ -474,13 +550,21 @@ install_contacts_api() {
 
     # ─── 1.1  Token GitHub ───
     local token
-    token=$(get_github_token)
+    token=$(get_github_token \
+        "${SOURCE_REPO_OWNER_DEFAULT}" \
+        "${SOURCE_REPO_NAME_DEFAULT}" \
+        "o rad-contacts.php")
 
     # ─── 1.2  Baixar PHP do repo privado pra /tmp ───
     local tmp_php="/tmp/rad-contacts.php.$$"
     trap 'rm -f "${tmp_php}"' EXIT
 
-    github_download_file "${token}" "${PHP_PATH_IN_REPO}" "${tmp_php}"
+    github_download_file "${token}" \
+        "${SOURCE_REPO_OWNER_DEFAULT}" \
+        "${SOURCE_REPO_NAME_DEFAULT}" \
+        "${SOURCE_REPO_BRANCH}" \
+        "${PHP_PATH_IN_REPO}" \
+        "${tmp_php}"
 
     # Sanity check: arquivo começa com <?php
     if ! head -c 5 "${tmp_php}" | grep -q '<?php'; then
@@ -758,6 +842,185 @@ ${C_BOLD}Próximos passos sugeridos:${C_RESET}
 EOF
 
     read -r -p "Pressione Enter pra voltar ao menu…" _ </dev/tty
+    show_menu
+}
+
+# ════════════════════════════════════════════════════════════════════════
+#  Opção 3 — Instalar Tema RAD-PBX
+# ════════════════════════════════════════════════════════════════════════
+
+install_rad_pbx_theme() {
+    printf '\n%s═══ Instalação do Tema RAD-PBX ═══%s\n\n' "${C_BOLD}" "${C_RESET}"
+
+    cat <<EOF
+${C_BOLD}Sobre esta instalação${C_RESET}
+──────────────────────
+Este passo baixa o tema ${C_BOLD}rad-pbx${C_RESET} do repositório privado
+${C_BOLD}${THEME_REPO_OWNER}/${THEME_REPO_NAME}${C_RESET} (branch ${THEME_REPO_BRANCH}) e instala:
+
+  ${C_DIM}• ${THEME_PATH_IN_REPO}/  →  ${THEME_INSTALL_DIR}/${C_RESET}
+  ${C_DIM}• ${MOTD_PATH_IN_REPO}        →  ${MOTD_INSTALL_PATH}${C_RESET}
+
+Arquivos existentes serão renomeados pra .bak.<timestamp> antes da cópia.
+
+EOF
+
+    # ─── 3.0  Pré-requisitos específicos da opção ───
+    require_cmd tar  "yum install -y tar"
+
+    if ! confirm "Continuar com a instalação do tema?"; then
+        info "Cancelado pelo usuário. Nada foi alterado."
+        read -r -p "Pressione Enter pra voltar ao menu…" _ </dev/tty
+        show_menu
+        return
+    fi
+
+    # ─── 3.1  Token GitHub (mesma UX da opção 1) ───
+    local token
+    token=$(get_github_token \
+        "${THEME_REPO_OWNER}" \
+        "${THEME_REPO_NAME}" \
+        "o tema rad-pbx")
+
+    # ─── 3.2  Baixar tarball do repo privado ───
+    local tmp_tar="/tmp/rad-pbx-theme.$$.tar.gz"
+    local tmp_extract="/tmp/rad-pbx-theme-extract.$$"
+    # Cleanup automático em qualquer saída — falha de rede, Ctrl+C, etc.
+    # Mantemos pasta de extração só até o final do install; cleanup remove tudo.
+    trap 'rm -rf "${tmp_tar}" "${tmp_extract}"' EXIT
+
+    github_download_tarball "${token}" \
+        "${THEME_REPO_OWNER}" \
+        "${THEME_REPO_NAME}" \
+        "${THEME_REPO_BRANCH}" \
+        "${tmp_tar}"
+
+    # Sanity: arquivo é gzip de verdade? (token errado às vezes retorna 200
+    # com body JSON de erro — defensivo.)
+    if ! file "${tmp_tar}" 2>/dev/null | grep -qi "gzip"; then
+        # Fallback: tenta inspecionar magic bytes diretamente (file pode estar ausente)
+        if ! head -c 2 "${tmp_tar}" | od -An -tx1 | grep -q "1f 8b"; then
+            die "Arquivo baixado não é um tarball gzip válido (token sem permissão?). Conteúdo em ${tmp_tar}."
+        fi
+    fi
+
+    # ─── 3.3  Extrair tarball ───
+    info "Extraindo tarball…"
+    mkdir -p "${tmp_extract}"
+    tar -xzf "${tmp_tar}" -C "${tmp_extract}" \
+        || die "Falha ao extrair ${tmp_tar} em ${tmp_extract}."
+
+    # GitHub empacota tudo dentro de uma pasta tipo
+    # ${owner}-${repo}-${commit_sha_curto}/ — resolvemos via find.
+    local extracted_root
+    extracted_root=$(find "${tmp_extract}" -mindepth 1 -maxdepth 1 -type d | head -1)
+    if [[ -z "${extracted_root}" || ! -d "${extracted_root}" ]]; then
+        die "Não consegui localizar a pasta raiz extraída em ${tmp_extract}."
+    fi
+    ok "Tarball extraído em ${extracted_root}"
+
+    local src_theme_dir="${extracted_root}/${THEME_PATH_IN_REPO}"
+    local src_motd_file="${extracted_root}/${MOTD_PATH_IN_REPO}"
+
+    # ─── 3.4  Validar que os paths esperados existem no tarball ───
+    if [[ ! -d "${src_theme_dir}" ]]; then
+        die "Pasta '${THEME_PATH_IN_REPO}' não encontrada no repo. Estrutura do repo mudou?"
+    fi
+    if [[ ! -f "${src_motd_file}" ]]; then
+        die "Arquivo '${MOTD_PATH_IN_REPO}' não encontrado no repo. Estrutura do repo mudou?"
+    fi
+    ok "Estrutura do repo validada — encontrados theme/ e motd.sh."
+
+    # ─── 3.5  Backup + instalação do tema ───
+    if [[ -d "${THEME_INSTALL_DIR}" ]]; then
+        local theme_backup="${THEME_INSTALL_DIR}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+        info "Tema existente detectado em ${THEME_INSTALL_DIR} — movendo pra ${theme_backup}…"
+        mv "${THEME_INSTALL_DIR}" "${theme_backup}" \
+            || die "Falha ao mover tema existente pra backup."
+        ok "Backup do tema antigo: ${theme_backup}"
+    fi
+
+    info "Detectando user/group efetivo do Apache…"
+    local apache_owner
+    apache_owner=$(detect_apache_owner)
+    ok "Apache roda como: ${apache_owner}  ${C_DIM}(detectado de ps + conf)${C_RESET}"
+
+    info "Instalando tema em ${THEME_INSTALL_DIR}…"
+    mkdir -p "$(dirname "${THEME_INSTALL_DIR}")"
+    # cp -rp preserva mtimes (importante pra cache do navegador via If-Modified-Since)
+    cp -rp "${src_theme_dir}" "${THEME_INSTALL_DIR}" \
+        || die "Falha ao copiar tema pra ${THEME_INSTALL_DIR}."
+
+    # Ownership pra Apache servir os assets sem 403.
+    chown -R "${apache_owner}" "${THEME_INSTALL_DIR}"
+    # Modo seguro: dirs 755, arquivos 644.
+    # 'X' (X maiúsculo) é o truque clássico — só adiciona x em diretórios
+    # ou arquivos que já têm x. Evita dar exec em PNG/CSS/JS.
+    chmod -R u=rwX,go=rX "${THEME_INSTALL_DIR}"
+    ok "Tema instalado em ${THEME_INSTALL_DIR} (owner ${apache_owner}, dirs 755 / arquivos 644)."
+
+    # SELinux: aplica contexto httpd_sys_content_t se SELinux ativo.
+    if command -v restorecon >/dev/null 2>&1; then
+        info "Aplicando contexto SELinux nos arquivos do tema…"
+        restorecon -Rv "${THEME_INSTALL_DIR}" >/dev/null 2>&1 || true
+    fi
+
+    # ─── 3.6  Backup + instalação do motd.sh ───
+    if [[ -f "${MOTD_INSTALL_PATH}" ]]; then
+        local motd_backup="${MOTD_INSTALL_PATH}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+        info "motd.sh existente detectado — backup em ${motd_backup}…"
+        cp -p "${MOTD_INSTALL_PATH}" "${motd_backup}" \
+            || die "Falha ao fazer backup de ${MOTD_INSTALL_PATH}."
+        ok "Backup do motd.sh antigo: ${motd_backup}"
+    fi
+
+    info "Instalando ${MOTD_INSTALL_PATH}…"
+    mkdir -p "$(dirname "${MOTD_INSTALL_PATH}")"
+    cp -p "${src_motd_file}" "${MOTD_INSTALL_PATH}" \
+        || die "Falha ao copiar motd.sh pra ${MOTD_INSTALL_PATH}."
+
+    # Permissões EXATAS solicitadas: -rwxr-xr-x root:root (modo 755).
+    # cp -p preserva o owner do tarball (extraído como root da sessão sudo);
+    # explicitamos chown defensivamente caso o tar tenha sido extraído por
+    # user diferente (raro em rodar sob sudo, mas barato).
+    chown "${MOTD_INSTALL_OWNER}" "${MOTD_INSTALL_PATH}" \
+        || warn "Falha ao definir owner ${MOTD_INSTALL_OWNER} em ${MOTD_INSTALL_PATH}."
+    chmod "${MOTD_INSTALL_MODE}" "${MOTD_INSTALL_PATH}" \
+        || die "Falha ao definir modo ${MOTD_INSTALL_MODE} em ${MOTD_INSTALL_PATH}."
+    ok "motd.sh instalado (owner ${MOTD_INSTALL_OWNER}, modo ${MOTD_INSTALL_MODE})."
+
+    # SELinux pro motd.sh — bin_t é o contexto correto pra binários em /usr/local/sbin.
+    if command -v restorecon >/dev/null 2>&1; then
+        restorecon -v "${MOTD_INSTALL_PATH}" >/dev/null 2>&1 || true
+    fi
+
+    # Confirma permissão final (visual pro usuário comparar com -rwxr-xr-x)
+    info "Permissão final do motd.sh:"
+    ls -l "${MOTD_INSTALL_PATH}" 2>/dev/null || true
+
+    # Cleanup imediato (trap também faz, mas explicit é mais higiênico)
+    rm -rf "${tmp_tar}" "${tmp_extract}"
+    trap - EXIT
+
+    # ─── 3.7  Resumo final ───
+    cat <<EOF
+
+${C_BOLD}${C_GREEN}═══ Tema RAD-PBX instalado ═══${C_RESET}
+
+  ${C_BOLD}Tema${C_RESET}:        ${THEME_INSTALL_DIR}
+  ${C_BOLD}motd.sh${C_RESET}:     ${MOTD_INSTALL_PATH}  ${C_DIM}(${MOTD_INSTALL_MODE} ${MOTD_INSTALL_OWNER})${C_RESET}
+
+${C_BOLD}Próximos passos sugeridos:${C_RESET}
+
+  1. No Issabel: ${C_DIM}System → Preferences → Theme${C_RESET} — selecione
+     ${C_BOLD}rad-pbx${C_RESET} na lista e salve.
+  2. Force refresh do navegador (Ctrl+Shift+R) pra invalidar cache de CSS/JS.
+  3. Faça login SSH novo pra testar o banner do motd.sh.
+
+EOF
+    _log_to_file "INSTALL THEME OK: ${THEME_INSTALL_DIR}, ${MOTD_INSTALL_PATH}"
+    ok "Pronto! Volte ao menu (Enter) ou Ctrl+C pra sair."
+    read -r
     show_menu
 }
 

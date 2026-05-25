@@ -2,6 +2,30 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-05-25
+
+### Adicionado
+
+- **Opção 3 no menu — Instalar Tema RAD-PBX**. Nova entrada que baixa o tema do repositório privado `rdebruem/rad-pbx-theme` (branch `main`) e instala dois artefatos no servidor Issabel:
+  - Pasta `www/html/themes/rad-pbx/` do repo → `/var/www/html/themes/rad-pbx/` no destino (owner detectado do Apache, dirs `755` / arquivos `644` via `chmod u=rwX,go=rX`).
+  - Arquivo `usr/local/sbin/motd.sh` do repo → `/usr/local/sbin/motd.sh` no destino, com permissão exata **`-rwxr-xr-x` (`755`) `root:root`** — banner executado pelo PAM em login SSH precisa ser executável por todos e imutável pelo usuário comum.
+  - Função `install_rad_pbx_theme()` em `install.sh`.
+- **Helper `github_download_tarball()`** — baixa o tarball completo de um repo privado via endpoint `GET /repos/{owner}/{repo}/tarball/{ref}` da GitHub API, com `curl -L` pra seguir o 302 → S3 e validação de magic bytes gzip (`1f 8b`) defensiva contra body JSON de erro. Necessário porque a pasta `rad-pbx/` do tema tem centenas de imagens — file-by-file via Contents API estouraria o rate limit do GitHub (5000 req/h) em uma única instalação.
+- **Constantes do tema** no topo do `install.sh`: `THEME_REPO_OWNER`, `THEME_REPO_NAME`, `THEME_REPO_BRANCH`, `THEME_PATH_IN_REPO`, `MOTD_PATH_IN_REPO`, `THEME_INSTALL_DIR`, `MOTD_INSTALL_PATH`, `MOTD_INSTALL_MODE`, `MOTD_INSTALL_OWNER`.
+- Backup automático antes de sobrescrever — tema existente vira `${THEME_INSTALL_DIR}.bak.<UTC-timestamp>` (via `mv`) e `motd.sh` existente vira `${MOTD_INSTALL_PATH}.bak.<UTC-timestamp>` (via `cp -p` pra preservar mtime/perms).
+- Aplicação de contexto SELinux via `restorecon -Rv` no diretório do tema e `restorecon -v` no `motd.sh` (no-op se SELinux disabled).
+
+### Mudado
+
+- **Refatorado `get_github_token()`** pra aceitar `owner`, `repo` e descrição do artefato como argumentos (com defaults pro caminho legado). `GITHUB_TOKEN` env var continua sendo honrado — um único PAT com escopo amplo serve pra múltiplos repos.
+- **Refatorado `github_download_file()`** pra aceitar `owner`, `repo`, `branch` como argumentos em vez de usar constantes globais. A opção 1 (rad-contacts.php) foi atualizada pra passar `SOURCE_REPO_OWNER_DEFAULT`/`NAME_DEFAULT`/`BRANCH` explicitamente — comportamento idêntico ao anterior.
+- `install.sh` v0.5.0 — feature nova (terceira opção do menu), bump minor.
+
+### Notas
+
+- O tema é versionado por designer no repo `rad-pbx-theme`, separado do `rad-ecosystem` (que tem ciclo de release de engenharia). Mesma justificativa de [ADR-0210] aplicada ao tema.
+- Pra criar o PAT do repositório do tema: `https://github.com/settings/personal-access-tokens/new` → escolher "Only select repositories" e marcar `rdebruem/rad-pbx-theme` → permissão `Contents: Read-only`. Token válido por até 1 ano; reusar entre opções 1 e 3 via `export GITHUB_TOKEN=...` antes de rodar o instalador.
+
 ## [0.4.0] — 2026-05-25
 
 ### Adicionado
