@@ -2,6 +2,23 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] — 2026-05-25
+
+### Mudado
+
+- **Rename `rad-pbx` → `rad_pbx`** em todos os caminhos do tema. Hífen no nome do tema pode ser interpretado como operador em alguns pontos do Issabel/Asterisk que tratam o identificador como expressão (themesetup, queries SQL sem aspas adequadas). Underscore é seguro em todos os contextos.
+  - Constante `THEME_REPO_NAME`: `rad-pbx-theme` → `rad_pbx-theme`.
+  - Constante `THEME_PATH_IN_REPO`: `www/html/themes/rad-pbx` → `www/html/themes/rad_pbx`.
+  - Constante `THEME_INSTALL_DIR`: `/var/www/html/themes/rad-pbx` → `/var/www/html/themes/rad_pbx`.
+  - Textos do menu, prompts e instruções de pós-instalação atualizados.
+  - Pasta renomeada via `git mv` no repositório `rad_pbx-theme` (histórico preservado).
+- `install.sh` v0.5.1 — patch (rename de path, sem mudança comportamental).
+
+### Notas
+
+- Quem já tinha instalado a v0.5.0 e instalar a v0.5.1 vai ficar com **dois diretórios** no servidor: o antigo `/var/www/html/themes/rad-pbx/` (não removido automaticamente) e o novo `/var/www/html/themes/rad_pbx/`. Remova o antigo manualmente se não precisar mais (`rm -rf /var/www/html/themes/rad-pbx/`).
+- O repositório no GitHub precisa ser renomeado de `rad-pbx-theme` para `rad_pbx-theme` antes do instalador v0.5.1 funcionar.
+
 ## [0.5.0] — 2026-05-25
 
 ### Adicionado

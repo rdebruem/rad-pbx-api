@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.5.0"
+readonly SCRIPT_VERSION="0.5.1"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -47,16 +47,19 @@ readonly INSTALL_MODE_PERMISSIVE="644"    # world-readable (fallback ionCube)
 # Mantido separado do rad-ecosystem porque o tema tem ciclo de release
 # independente e é versionado por designer, não por engenharia.
 readonly THEME_REPO_OWNER="rdebruem"
-readonly THEME_REPO_NAME="rad-pbx-theme"
+readonly THEME_REPO_NAME="rad_pbx-theme"
 readonly THEME_REPO_BRANCH="main"
 
 # Caminhos DENTRO do repo do tema (relativos à raiz).
-readonly THEME_PATH_IN_REPO="www/html/themes/rad-pbx"
+# Nome rad_pbx (com underscore, sem hífen) porque alguns pontos do
+# Issabel/Asterisk tratam o nome do tema como identificador onde hífen
+# pode ser interpretado como operador.
+readonly THEME_PATH_IN_REPO="www/html/themes/rad_pbx"
 readonly MOTD_PATH_IN_REPO="usr/local/sbin/motd.sh"
 
 # Caminhos de destino no servidor Issabel.
 # /var/www/html/themes/... é o layout padrão do Issabel pra temas.
-readonly THEME_INSTALL_DIR="/var/www/html/themes/rad-pbx"
+readonly THEME_INSTALL_DIR="/var/www/html/themes/rad_pbx"
 readonly MOTD_INSTALL_PATH="/usr/local/sbin/motd.sh"
 # motd.sh é executado pelo PAM em cada login SSH (via pam_exec) — precisa
 # ser executável por todos (-rwxr-xr-x = 755) e owner root:root pra evitar
@@ -307,7 +310,7 @@ github_download_file() {
 
 # Baixa o tarball completo de um repo privado via GitHub API.
 # Mais eficiente que Contents API quando precisamos de uma pasta inteira
-# (ex.: tema rad-pbx tem centenas de imagens — file-by-file estouraria o
+# (ex.: tema rad_pbx tem centenas de imagens — file-by-file estouraria o
 # rate limit e demoraria minutos).
 #   $1 = github token
 #   $2 = owner do repo
@@ -511,7 +514,7 @@ ${C_BOLD}Menu principal${C_RESET}
 
   ${C_BOLD}3${C_RESET})  Instalar Tema RAD-PBX
        └─ baixa o tema do repo privado ${THEME_REPO_OWNER}/${THEME_REPO_NAME} e
-          substitui /var/www/html/themes/rad-pbx/ + /usr/local/sbin/motd.sh.
+          substitui ${THEME_INSTALL_DIR}/ + ${MOTD_INSTALL_PATH}.
 
   ${C_BOLD}q${C_RESET})  Sair
 
@@ -855,7 +858,7 @@ install_rad_pbx_theme() {
     cat <<EOF
 ${C_BOLD}Sobre esta instalação${C_RESET}
 ──────────────────────
-Este passo baixa o tema ${C_BOLD}rad-pbx${C_RESET} do repositório privado
+Este passo baixa o tema ${C_BOLD}rad_pbx${C_RESET} do repositório privado
 ${C_BOLD}${THEME_REPO_OWNER}/${THEME_REPO_NAME}${C_RESET} (branch ${THEME_REPO_BRANCH}) e instala:
 
   ${C_DIM}• ${THEME_PATH_IN_REPO}/  →  ${THEME_INSTALL_DIR}/${C_RESET}
@@ -880,11 +883,11 @@ EOF
     token=$(get_github_token \
         "${THEME_REPO_OWNER}" \
         "${THEME_REPO_NAME}" \
-        "o tema rad-pbx")
+        "o tema rad_pbx")
 
     # ─── 3.2  Baixar tarball do repo privado ───
-    local tmp_tar="/tmp/rad-pbx-theme.$$.tar.gz"
-    local tmp_extract="/tmp/rad-pbx-theme-extract.$$"
+    local tmp_tar="/tmp/rad_pbx-theme.$$.tar.gz"
+    local tmp_extract="/tmp/rad_pbx-theme-extract.$$"
     # Cleanup automático em qualquer saída — falha de rede, Ctrl+C, etc.
     # Mantemos pasta de extração só até o final do install; cleanup remove tudo.
     trap 'rm -rf "${tmp_tar}" "${tmp_extract}"' EXIT
@@ -1013,7 +1016,7 @@ ${C_BOLD}${C_GREEN}═══ Tema RAD-PBX instalado ═══${C_RESET}
 ${C_BOLD}Próximos passos sugeridos:${C_RESET}
 
   1. No Issabel: ${C_DIM}System → Preferences → Theme${C_RESET} — selecione
-     ${C_BOLD}rad-pbx${C_RESET} na lista e salve.
+     ${C_BOLD}rad_pbx${C_RESET} na lista e salve.
   2. Force refresh do navegador (Ctrl+Shift+R) pra invalidar cache de CSS/JS.
   3. Faça login SSH novo pra testar o banner do motd.sh.
 
