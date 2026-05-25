@@ -2,6 +2,19 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] — 2026-05-25
+
+### Adicionado
+
+- **favicon.ico instalado pela opção 3**. A função `install_rad_pbx_theme()` agora copia também `www/html/favicon.ico` do repo do tema para `/var/www/html/favicon.ico` no servidor, substituindo o favicon original do Issabel. Aplica:
+  - Owner = mesmo `apache_owner` detectado pra pasta do tema (em Issabel padrão = `asterisk:asterisk`).
+  - Mode `644` — idêntico ao favicon de fábrica do Issabel (`-rw-r--r--`).
+  - Backup `${FAVICON_INSTALL_PATH}.bak.<UTC-timestamp>` do favicon existente antes de sobrescrever.
+  - `restorecon -v` no favicon (no-op se SELinux disabled).
+- Constantes `FAVICON_PATH_IN_REPO`, `FAVICON_INSTALL_PATH` e `FAVICON_INSTALL_MODE` no topo do `install.sh`.
+- Validação no extract: se `www/html/favicon.ico` não existir no tarball baixado, o instalador aborta com mensagem clara antes de tocar em qualquer coisa do sistema.
+- `install.sh` v0.5.2 — patch (artefato novo no pipeline de instalação do tema, sem mudança de contrato).
+
 ## [0.5.1] — 2026-05-25
 
 ### Mudado

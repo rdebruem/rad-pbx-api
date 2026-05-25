@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.5.1"
+readonly SCRIPT_VERSION="0.5.2"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -56,11 +56,18 @@ readonly THEME_REPO_BRANCH="main"
 # pode ser interpretado como operador.
 readonly THEME_PATH_IN_REPO="www/html/themes/rad_pbx"
 readonly MOTD_PATH_IN_REPO="usr/local/sbin/motd.sh"
+readonly FAVICON_PATH_IN_REPO="www/html/favicon.ico"
 
 # Caminhos de destino no servidor Issabel.
 # /var/www/html/themes/... é o layout padrão do Issabel pra temas.
 readonly THEME_INSTALL_DIR="/var/www/html/themes/rad_pbx"
 readonly MOTD_INSTALL_PATH="/usr/local/sbin/motd.sh"
+# favicon.ico fica direto em /var/www/html — Issabel serve em /favicon.ico
+# como qualquer navegador espera. Owner = apache (asterisk:asterisk em
+# Issabel — detectado em runtime), mode 644 (igual ao favicon que vem
+# de fábrica no Issabel).
+readonly FAVICON_INSTALL_PATH="/var/www/html/favicon.ico"
+readonly FAVICON_INSTALL_MODE="644"
 # motd.sh é executado pelo PAM em cada login SSH (via pam_exec) — precisa
 # ser executável por todos (-rwxr-xr-x = 755) e owner root:root pra evitar
 # que usuários menos privilegiados sobrescrevam o banner do sistema.
@@ -862,6 +869,7 @@ Este passo baixa o tema ${C_BOLD}rad_pbx${C_RESET} do repositório privado
 ${C_BOLD}${THEME_REPO_OWNER}/${THEME_REPO_NAME}${C_RESET} (branch ${THEME_REPO_BRANCH}) e instala:
 
   ${C_DIM}• ${THEME_PATH_IN_REPO}/  →  ${THEME_INSTALL_DIR}/${C_RESET}
+  ${C_DIM}• ${FAVICON_PATH_IN_REPO}        →  ${FAVICON_INSTALL_PATH}${C_RESET}
   ${C_DIM}• ${MOTD_PATH_IN_REPO}        →  ${MOTD_INSTALL_PATH}${C_RESET}
 
 Arquivos existentes serão renomeados pra .bak.<timestamp> antes da cópia.
@@ -924,6 +932,7 @@ EOF
 
     local src_theme_dir="${extracted_root}/${THEME_PATH_IN_REPO}"
     local src_motd_file="${extracted_root}/${MOTD_PATH_IN_REPO}"
+    local src_favicon_file="${extracted_root}/${FAVICON_PATH_IN_REPO}"
 
     # ─── 3.4  Validar que os paths esperados existem no tarball ───
     if [[ ! -d "${src_theme_dir}" ]]; then
@@ -932,7 +941,10 @@ EOF
     if [[ ! -f "${src_motd_file}" ]]; then
         die "Arquivo '${MOTD_PATH_IN_REPO}' não encontrado no repo. Estrutura do repo mudou?"
     fi
-    ok "Estrutura do repo validada — encontrados theme/ e motd.sh."
+    if [[ ! -f "${src_favicon_file}" ]]; then
+        die "Arquivo '${FAVICON_PATH_IN_REPO}' não encontrado no repo. Estrutura do repo mudou?"
+    fi
+    ok "Estrutura do repo validada — encontrados theme/, favicon.ico e motd.sh."
 
     # ─── 3.5  Backup + instalação do tema ───
     if [[ -d "${THEME_INSTALL_DIR}" ]]; then
@@ -968,7 +980,32 @@ EOF
         restorecon -Rv "${THEME_INSTALL_DIR}" >/dev/null 2>&1 || true
     fi
 
-    # ─── 3.6  Backup + instalação do motd.sh ───
+    # ─── 3.6  Backup + instalação do favicon.ico ───
+    # Reusa apache_owner já detectado no passo do tema (asterisk:asterisk
+    # em Issabel padrão). O favicon do Issabel de fábrica fica em
+    # /var/www/html/favicon.ico com mode 644 e apache_owner — replicamos.
+    if [[ -f "${FAVICON_INSTALL_PATH}" ]]; then
+        local favicon_backup="${FAVICON_INSTALL_PATH}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+        info "favicon.ico existente detectado — backup em ${favicon_backup}…"
+        cp -p "${FAVICON_INSTALL_PATH}" "${favicon_backup}" \
+            || die "Falha ao fazer backup de ${FAVICON_INSTALL_PATH}."
+        ok "Backup do favicon antigo: ${favicon_backup}"
+    fi
+
+    info "Instalando ${FAVICON_INSTALL_PATH}…"
+    cp -p "${src_favicon_file}" "${FAVICON_INSTALL_PATH}" \
+        || die "Falha ao copiar favicon.ico pra ${FAVICON_INSTALL_PATH}."
+    chown "${apache_owner}" "${FAVICON_INSTALL_PATH}" \
+        || warn "Falha ao definir owner ${apache_owner} em ${FAVICON_INSTALL_PATH}."
+    chmod "${FAVICON_INSTALL_MODE}" "${FAVICON_INSTALL_PATH}" \
+        || die "Falha ao definir modo ${FAVICON_INSTALL_MODE} em ${FAVICON_INSTALL_PATH}."
+    ok "favicon.ico instalado (owner ${apache_owner}, modo ${FAVICON_INSTALL_MODE})."
+
+    if command -v restorecon >/dev/null 2>&1; then
+        restorecon -v "${FAVICON_INSTALL_PATH}" >/dev/null 2>&1 || true
+    fi
+
+    # ─── 3.7  Backup + instalação do motd.sh ───
     if [[ -f "${MOTD_INSTALL_PATH}" ]]; then
         local motd_backup="${MOTD_INSTALL_PATH}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
         info "motd.sh existente detectado — backup em ${motd_backup}…"
@@ -1005,12 +1042,13 @@ EOF
     rm -rf "${tmp_tar}" "${tmp_extract}"
     trap - EXIT
 
-    # ─── 3.7  Resumo final ───
+    # ─── 3.8  Resumo final ───
     cat <<EOF
 
 ${C_BOLD}${C_GREEN}═══ Tema RAD-PBX instalado ═══${C_RESET}
 
   ${C_BOLD}Tema${C_RESET}:        ${THEME_INSTALL_DIR}
+  ${C_BOLD}favicon.ico${C_RESET}: ${FAVICON_INSTALL_PATH}  ${C_DIM}(${FAVICON_INSTALL_MODE} ${apache_owner})${C_RESET}
   ${C_BOLD}motd.sh${C_RESET}:     ${MOTD_INSTALL_PATH}  ${C_DIM}(${MOTD_INSTALL_MODE} ${MOTD_INSTALL_OWNER})${C_RESET}
 
 ${C_BOLD}Próximos passos sugeridos:${C_RESET}

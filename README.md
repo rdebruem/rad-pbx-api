@@ -10,7 +10,7 @@ Um único script `install.sh` apresenta um menu com componentes que podem ser pr
 
 1. **API de contatos** — endpoint HTTP que o RAD Softphone consome pra puxar a lista de ramais da central.
 2. **Áudios PT-BR** — aplica o patch da comunidade [ibinetwork/IssabelBR](https://github.com/ibinetwork/IssabelBR) (prompts de URA, voicemail e sons do sistema em português brasileiro).
-3. **Tema RAD-PBX** — baixa o tema do repositório privado `rdebruem/rad-pbx-theme` e instala em `/var/www/html/themes/rad_pbx/`, substituindo também o `/usr/local/sbin/motd.sh` (banner SSH) com permissões `-rwxr-xr-x root:root`.
+3. **Tema RAD-PBX** — baixa o tema do repositório privado `rdebruem/rad-pbx-theme` e instala em `/var/www/html/themes/rad_pbx/`, substituindo também o `/var/www/html/favicon.ico` (mode 644, owner apache) e o `/usr/local/sbin/motd.sh` (banner SSH) com permissões `-rwxr-xr-x root:root`.
 
 Mais opções entram conforme o ecossistema cresce.
 
