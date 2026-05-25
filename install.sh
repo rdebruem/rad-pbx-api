@@ -435,6 +435,9 @@ ${C_BOLD}Menu principal${C_RESET}
   ${C_BOLD}1${C_RESET})  Instalar API de contatos (rad-contacts.php)
        └─ endpoint HTTP que o RAD Softphone usa pra puxar ramais.
 
+  ${C_BOLD}2${C_RESET})  Instalar áudios PT-BR (módulo Issabel PBX PT-BR)
+       └─ baixa e aplica o patch ibinetwork/IssabelBR (áudios em português).
+
   ${C_BOLD}q${C_RESET})  Sair
 
 EOF
@@ -442,6 +445,7 @@ EOF
     read -r -p "Escolha uma opção: " choice </dev/tty
     case "${choice}" in
         1)  install_contacts_api ;;
+        2)  install_ptbr_audios ;;
         q|Q) info "Saindo."; exit 0 ;;
         "") warn "Input vazio (provavelmente stdin do bash não está atrelado ao terminal — curl|sudo bash em alguns sudos). Use: wget https://raw.githubusercontent.com/rdebruem/rad-pbx-api/main/install.sh && chmod +x install.sh && sudo ./install.sh"; exit 1 ;;
         *)  warn "Opção inválida: '${choice}'"; sleep 1; show_menu ;;
@@ -684,6 +688,76 @@ EOF
     _log_to_file "INSTALL OK: api_key=<redacted> ami_user=${ami_user}"
     ok "Pronto! Volte ao menu (Enter) ou Ctrl+C pra sair."
     read -r
+    show_menu
+}
+
+# ════════════════════════════════════════════════════════════════════════
+#  Opção 2 — Instalar áudios PT-BR (módulo Issabel PBX PT-BR)
+# ════════════════════════════════════════════════════════════════════════
+
+# Roda o patch-issabelbr.sh do projeto ibinetwork/IssabelBR, que copia
+# áudios em PT-BR pra central Issabel. O script remoto é mantido por
+# terceiros — exibimos aviso claro e pedimos confirmação antes de rodar
+# qualquer coisa baixada de fora do nosso repo.
+readonly PTBR_PATCH_URL="https://github.com/ibinetwork/IssabelBR/raw/master/patch-issabelbr.sh"
+
+install_ptbr_audios() {
+    printf '\n%s═══ Instalação de áudios PT-BR (Issabel PBX PT-BR) ═══%s\n\n' "${C_BOLD}" "${C_RESET}"
+
+    cat <<EOF
+${C_BOLD}Sobre este patch${C_RESET}
+──────────────────
+Este passo executa o script ${C_BOLD}patch-issabelbr.sh${C_RESET} mantido pelo projeto
+${C_BOLD}ibinetwork/IssabelBR${C_RESET} no GitHub. Ele baixa e instala áudios em
+português brasileiro na sua central Issabel.
+
+  URL: ${C_DIM}${PTBR_PATCH_URL}${C_RESET}
+
+${C_YELLOW}⚠${C_RESET}  ${C_BOLD}Aviso:${C_RESET} o script é mantido por terceiros e roda como root.
+   Recomenda-se revisar o conteúdo antes de aplicar em produção.
+
+EOF
+
+    if ! confirm "Continuar e executar o patch agora?"; then
+        info "Cancelado pelo usuário. Nada foi alterado."
+        read -r -p "Pressione Enter pra voltar ao menu…" _ </dev/tty
+        show_menu
+        return
+    fi
+
+    require_cmd wget "yum install -y wget   (ou apt-get install -y wget)"
+    require_cmd bash
+
+    info "Baixando e executando ${PTBR_PATCH_URL}…"
+    _log_to_file "PTBR_PATCH: invocando ${PTBR_PATCH_URL}"
+
+    # Pipe wget → bash, idêntico ao comando documentado pelo upstream.
+    # set +e local pra capturar exit code sem matar o instalador.
+    local patch_status
+    set +e
+    wget -O - "${PTBR_PATCH_URL}" | bash
+    patch_status=${PIPESTATUS[1]:-$?}
+    set -e
+
+    if [[ ${patch_status} -eq 0 ]]; then
+        ok "Patch PT-BR executado com sucesso (exit 0)."
+        _log_to_file "PTBR_PATCH OK"
+    else
+        warn "Patch PT-BR terminou com exit ${patch_status}. Revise a saída acima."
+        _log_to_file "PTBR_PATCH FAIL exit=${patch_status}"
+    fi
+
+    cat <<EOF
+
+${C_BOLD}Próximos passos sugeridos:${C_RESET}
+
+  1. Reiniciar/recarregar o Asterisk pra garantir que os novos áudios sejam
+     servidos: ${C_DIM}asterisk -rx "core reload"${C_RESET}
+  2. Testar uma chamada que dispare URA/IVR pra confirmar prompts em PT-BR.
+
+EOF
+
+    read -r -p "Pressione Enter pra voltar ao menu…" _ </dev/tty
     show_menu
 }
 
