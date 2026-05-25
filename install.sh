@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.5.3"
+readonly SCRIPT_VERSION="0.5.4"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -58,6 +58,13 @@ readonly THEME_PATH_IN_REPO="www/html/themes/rad_pbx"
 readonly MOTD_PATH_IN_REPO="usr/local/sbin/motd.sh"
 readonly FAVICON_PATH_IN_REPO="www/html/favicon.ico"
 readonly BRLANG_PATH_IN_REPO="www/html/lang/br.lang"
+# Módulos PHP do Issabel — pasta inteira é substituída (NÃO merge — o
+# Issabel não tem mecanismo de "patch parcial" pra módulos, e arquivos
+# órfãos do módulo antigo causam bugs sutis de inclusão).
+readonly MODULES_DIR_IN_REPO="www/html/modules"
+# Array dos módulos que a opção 3 mantém. Ordem é a que aparece nos prompts
+# e backups; idempotente: rodar de novo gera novos .bak.<UTC> sem perda.
+readonly MODULES_TO_INSTALL=(agent_console campaign_monitoring)
 
 # Caminhos de destino no servidor Issabel.
 # /var/www/html/themes/... é o layout padrão do Issabel pra temas.
@@ -74,6 +81,8 @@ readonly FAVICON_INSTALL_MODE="644"
 # mode 644.
 readonly BRLANG_INSTALL_PATH="/var/www/html/lang/br.lang"
 readonly BRLANG_INSTALL_MODE="644"
+# Diretório destino dos módulos PHP do Issabel.
+readonly MODULES_INSTALL_DIR="/var/www/html/modules"
 # motd.sh é executado pelo PAM em cada login SSH (via pam_exec) — precisa
 # ser executável por todos (-rwxr-xr-x = 755) e owner root:root pra evitar
 # que usuários menos privilegiados sobrescrevam o banner do sistema.
@@ -878,8 +887,10 @@ ${C_BOLD}${THEME_REPO_OWNER}/${THEME_REPO_NAME}${C_RESET} (branch ${THEME_REPO_B
   ${C_DIM}• ${FAVICON_PATH_IN_REPO}        →  ${FAVICON_INSTALL_PATH}${C_RESET}
   ${C_DIM}• ${BRLANG_PATH_IN_REPO}       →  ${BRLANG_INSTALL_PATH}${C_RESET}
   ${C_DIM}• ${MOTD_PATH_IN_REPO}        →  ${MOTD_INSTALL_PATH}${C_RESET}
+  ${C_DIM}• ${MODULES_DIR_IN_REPO}/agent_console/        →  ${MODULES_INSTALL_DIR}/agent_console/${C_RESET}
+  ${C_DIM}• ${MODULES_DIR_IN_REPO}/campaign_monitoring/  →  ${MODULES_INSTALL_DIR}/campaign_monitoring/${C_RESET}
 
-Arquivos existentes serão renomeados pra .bak.<timestamp> antes da cópia.
+Diretórios/arquivos existentes serão renomeados pra .bak.<timestamp> antes da cópia.
 
 EOF
 
@@ -955,7 +966,15 @@ EOF
     if [[ ! -f "${src_brlang_file}" ]]; then
         die "Arquivo '${BRLANG_PATH_IN_REPO}' não encontrado no repo. Estrutura do repo mudou?"
     fi
-    ok "Estrutura do repo validada — encontrados theme/, favicon.ico, br.lang e motd.sh."
+    # Valida TODOS os módulos antes de qualquer cópia — falha rápido se algum
+    # tiver sido removido do repo, pra não deixar o sistema em estado misto.
+    local module_name
+    for module_name in "${MODULES_TO_INSTALL[@]}"; do
+        if [[ ! -d "${extracted_root}/${MODULES_DIR_IN_REPO}/${module_name}" ]]; then
+            die "Módulo '${MODULES_DIR_IN_REPO}/${module_name}' não encontrado no repo. Estrutura do repo mudou?"
+        fi
+    done
+    ok "Estrutura do repo validada — encontrados theme/, favicon.ico, br.lang, motd.sh e módulos: ${MODULES_TO_INSTALL[*]}."
 
     # ─── 3.5  Backup + instalação do tema ───
     if [[ -d "${THEME_INSTALL_DIR}" ]]; then
@@ -1075,11 +1094,48 @@ EOF
     info "Permissão final do motd.sh:"
     ls -l "${MOTD_INSTALL_PATH}" 2>/dev/null || true
 
+    # ─── 3.9  Backup + instalação dos módulos PHP ───
+    # Substituição COMPLETA da pasta — mesmo padrão do tema (mv → backup
+    # antes de cp -rp do novo). NÃO é merge: arquivos órfãos do módulo
+    # antigo causam bugs sutis no autoloader do Issabel.
+    #
+    # Owner = apache_owner detectado lá em cima pra dar consistência com
+    # o resto dos artefatos servidos pelo Apache. dirs 755 / arquivos 644
+    # via chmod u=rwX,go=rX (mesmo truque usado no tema).
+    info "Detectando estado dos módulos PHP em ${MODULES_INSTALL_DIR}/…"
+    mkdir -p "${MODULES_INSTALL_DIR}"
+
+    local module_name src_module_dir dest_module_dir module_backup
+    for module_name in "${MODULES_TO_INSTALL[@]}"; do
+        src_module_dir="${extracted_root}/${MODULES_DIR_IN_REPO}/${module_name}"
+        dest_module_dir="${MODULES_INSTALL_DIR}/${module_name}"
+
+        if [[ -d "${dest_module_dir}" ]]; then
+            module_backup="${dest_module_dir}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+            info "Módulo '${module_name}' existente — movendo pra ${module_backup}…"
+            mv "${dest_module_dir}" "${module_backup}" \
+                || die "Falha ao mover ${dest_module_dir} pra backup."
+            ok "Backup do módulo antigo: ${module_backup}"
+        fi
+
+        info "Instalando módulo '${module_name}' em ${dest_module_dir}…"
+        cp -rp "${src_module_dir}" "${dest_module_dir}" \
+            || die "Falha ao copiar módulo '${module_name}' pra ${dest_module_dir}."
+
+        chown -R "${apache_owner}" "${dest_module_dir}"
+        chmod -R u=rwX,go=rX "${dest_module_dir}"
+        ok "Módulo '${module_name}' instalado (owner ${apache_owner}, dirs 755 / arquivos 644)."
+
+        if command -v restorecon >/dev/null 2>&1; then
+            restorecon -Rv "${dest_module_dir}" >/dev/null 2>&1 || true
+        fi
+    done
+
     # Cleanup imediato (trap também faz, mas explicit é mais higiênico)
     rm -rf "${tmp_tar}" "${tmp_extract}"
     trap - EXIT
 
-    # ─── 3.9  Resumo final ───
+    # ─── 3.10 Resumo final ───
     cat <<EOF
 
 ${C_BOLD}${C_GREEN}═══ Tema RAD-PBX instalado ═══${C_RESET}
@@ -1088,6 +1144,7 @@ ${C_BOLD}${C_GREEN}═══ Tema RAD-PBX instalado ═══${C_RESET}
   ${C_BOLD}favicon.ico${C_RESET}: ${FAVICON_INSTALL_PATH}  ${C_DIM}(${FAVICON_INSTALL_MODE} ${apache_owner})${C_RESET}
   ${C_BOLD}br.lang${C_RESET}:     ${BRLANG_INSTALL_PATH}  ${C_DIM}(${BRLANG_INSTALL_MODE} ${apache_owner})${C_RESET}
   ${C_BOLD}motd.sh${C_RESET}:     ${MOTD_INSTALL_PATH}  ${C_DIM}(${MOTD_INSTALL_MODE} ${MOTD_INSTALL_OWNER})${C_RESET}
+  ${C_BOLD}Módulos${C_RESET}:     ${MODULES_INSTALL_DIR}/{${MODULES_TO_INSTALL[0]},${MODULES_TO_INSTALL[1]}}/  ${C_DIM}(755/644 ${apache_owner})${C_RESET}
 
 ${C_BOLD}Próximos passos sugeridos:${C_RESET}
 

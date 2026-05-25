@@ -2,6 +2,26 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.5.4] — 2026-05-25
+
+### Adicionado
+
+- **Módulos PHP `agent_console` e `campaign_monitoring` instalados pela opção 3**. A função `install_rad_pbx_theme()` agora também substitui as pastas completas dos dois módulos do Issabel:
+  - `www/html/modules/agent_console/`        → `/var/www/html/modules/agent_console/`
+  - `www/html/modules/campaign_monitoring/`  → `/var/www/html/modules/campaign_monitoring/`
+  - **Substituição completa (NÃO merge)**: a pasta destino é movida pra `.bak.<UTC-timestamp>` via `mv` antes de copiar a nova via `cp -rp`. Merge causaria arquivos órfãos do módulo antigo coexistindo com o novo — e o autoloader do Issabel inclui tudo, então qualquer arquivo PHP órfão pode quebrar o módulo de forma sutil.
+  - Owner = mesmo `apache_owner` detectado pra pasta do tema (em Issabel padrão = `asterisk:asterisk`).
+  - Modo: dirs `755` / arquivos `644` via `chmod -R u=rwX,go=rX` (mesmo truque usado pro tema — `X` maiúsculo só dá exec em diretórios ou arquivos que já tinham, evita marcar PHP/HTML como executável).
+  - `restorecon -Rv` em cada módulo (no-op se SELinux disabled).
+- Constantes `MODULES_DIR_IN_REPO`, `MODULES_INSTALL_DIR` e o array `MODULES_TO_INSTALL=(agent_console campaign_monitoring)` no topo do `install.sh`. Adicionar/remover módulos no futuro é um one-liner — só alterar o array.
+- Validação atômica estendida: o instalador checa que cada módulo do array existe no tarball ANTES de tocar em qualquer pasta do sistema. Se um dos módulos for removido do repo, o instalador aborta sem efeitos colaterais.
+- `install.sh` v0.5.4 — patch (novos artefatos no pipeline, sem mudança de contrato).
+
+### Notas
+
+- Os módulos `agent_console` e `campaign_monitoring` substituem versões customizadas pelo RAD sobre a base Issabel. Backups datados ficam em `/var/www/html/modules/<nome>.bak.<UTC>` — útil pra comparar diffs depois (`diff -r <bak> <novo>`) ou rollback rápido (`mv` reverso).
+- Se você adicionar mais módulos ao array no futuro, eles são processados na ordem listada — backups recebem timestamps separados, e qualquer falha em um módulo aborta antes dos próximos.
+
 ## [0.5.3] — 2026-05-25
 
 ### Adicionado
