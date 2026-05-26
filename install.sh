@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.6.0"
+readonly SCRIPT_VERSION="0.8.0"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -90,7 +90,21 @@ readonly MOTD_INSTALL_MODE="755"
 readonly MOTD_INSTALL_OWNER="root:root"
 
 # Asterisk Manager Interface.
-readonly MANAGER_CONF="/etc/asterisk/manager.conf"
+#
+# IMPORTANTE — destino do bloco AMI é `manager_custom.conf`, NÃO o
+# `manager.conf` principal. Descoberta empírica em 2026-05-26 (servidor
+# Issabel 4.0.0-9 do Renato): editar `/etc/asterisk/manager.conf` —
+# mesmo só com append, SEM rodar `asterisk -rx "manager reload"` —
+# dispara reload silencioso que derruba a sessão AMI do dialerd
+# (CallCenter), causando loop de `failed to authenticate as 'admin'`.
+# Provavelmente o asterisk tem `inotify` no arquivo principal.
+#
+# O `manager_custom.conf` é incluído via `#include manager_custom.conf`
+# do arquivo principal, mas NÃO é vigiado pelo mesmo watcher. É o local
+# que o Issabel/FreePBX oficialmente designa pra customizações (vem com
+# `[phpconfig]`, `[phpagi]`, `[a2billinguser]` etc. pré-cadastrados).
+# Editar esse arquivo é totalmente safe pra produção em curso.
+readonly MANAGER_CONF="/etc/asterisk/manager_custom.conf"
 readonly AMI_USER_DEFAULT="rad-localhost"
 readonly AMI_READ_PERMS="system,call,user,reporting"
 # write=command é OBRIGATÓRIO pro Action:Command funcionar — o PHP usa
@@ -596,6 +610,152 @@ manager_add_user() {
 }
 
 # ════════════════════════════════════════════════════════════════════════
+#  Reload seguro do manager + restart de consumidores AMI
+# ════════════════════════════════════════════════════════════════════════
+
+# Daemons conhecidos que tipicamente mantêm conexão AMI persistente em
+# servidores Issabel. Cada daemon é restartado independentemente — falha
+# em um não afeta os outros. Adicionar novos? Mantenha ordem de prioridade:
+# mais crítico primeiro. Asterisk de propósito NÃO está aqui — restartar
+# asterisk derruba TODAS as chamadas/registros e é último recurso que o
+# operador faz manualmente, não algo que o installer deve oferecer em
+# fluxo guiado por sim/não.
+#
+# Histórico: dois incidentes em produção (servidor Issabel do Renato em
+# 2026-05-26) revelaram causa raiz dupla:
+#   1. Editar `manager.conf` principal dispara reload silencioso via inotify
+#      do asterisk — sem ninguém rodar `asterisk -rx "manager reload"`. Fix
+#      definitivo: v0.8.0 move append pra `manager_custom.conf` que não é
+#      vigiado. Ver comentário em MANAGER_CONF acima.
+#   2. Quando o reload ACONTECE (manual ou auto), sessões AMI ativas
+#      revalidam. Se houver divergência entre `manager.conf [admin].secret`
+#      e a senha que daemons (issabeldialer, fop2) têm em memória, eles
+#      entram em loop de `failed to authenticate as 'admin' ~1×/s`. Fix:
+#      `pkill -9 -f dialerd && /etc/rc.d/init.d/issabeldialer start` (SYSV
+#      service em `active (exited)` não rastreia filhos — systemctl restart
+#      sozinho não basta). Esta lista existe pra oferecer o restart
+#      proativamente após reload, antes do operador ver o sintoma.
+readonly AMI_CONSUMERS_KNOWN=(issabeldialer fop2)
+
+# Faz `asterisk -rx "manager reload"` com proteção:
+#   1. Snapshot de clientes AMI conectados ANTES — operador vê exatamente
+#      quem vai ser derrubado pela revalidação forçada de sessão.
+#   2. Aviso explícito sobre impacto operacional (daemons com senha
+#      cacheada em memória vão começar a falhar autenticação).
+#   3. Confirmação opt-in com default = N (mais seguro — preserva
+#      sessões ativas se operador não tiver certeza).
+#
+# Retorna:
+#   0 — reload feito com sucesso
+#   1 — operador escolheu pular reload (instruções de manual já exibidas)
+#   2 — reload tentado mas Asterisk não respondeu (asterisk parado?)
+manager_safe_reload() {
+    cat <<EOF
+
+${C_BOLD}Reload do AMI${C_RESET}
+─────────────────
+O novo bloco AMI só fica ativo após ${C_DIM}asterisk -rx "manager reload"${C_RESET}.
+
+${C_YELLOW}⚠${C_RESET}  Reload força revalidação de TODAS as sessões AMI ativas. Daemons
+   que tiverem senha cacheada em memória (ex: ${C_BOLD}issabeldialer${C_RESET}, ${C_BOLD}fop2${C_RESET})
+   podem começar a falhar autenticação em loop até serem reiniciados.
+
+   Sintoma típico no /var/log/asterisk/full após reload:
+     ${C_DIM}NOTICE manager.c authenticate: 127.0.0.1 failed to authenticate as 'admin'${C_RESET}
+
+   Esta versão do installer oferece restartar esses daemons pra você
+   logo após o reload, na próxima etapa.
+
+EOF
+    info "Sessões AMI ativas neste momento:"
+    local connected
+    if connected=$(asterisk -rx "manager show connected" 2>&1); then
+        printf '%s\n' "${connected}" | sed 's/^/  /'
+    else
+        warn "Não consegui consultar 'manager show connected' — Asterisk pode estar parado."
+    fi
+    printf '\n'
+
+    if ! confirm "Rodar 'manager reload' AGORA?"; then
+        cat <<EOF
+
+${C_DIM}Reload pulado. Quando quiser ativar o novo bloco AMI, rode manualmente:${C_RESET}
+  ${C_BOLD}asterisk -rx "manager reload"${C_RESET}
+
+${C_DIM}E se aparecer 'failed to authenticate as admin' em loop no /var/log/asterisk/full:${C_RESET}
+  ${C_BOLD}systemctl restart issabeldialer fop2${C_RESET}
+
+EOF
+        return 1
+    fi
+
+    info "Recarregando manager do Asterisk…"
+    if asterisk -rx "manager reload" >/dev/null 2>&1; then
+        ok "Manager recarregado."
+        return 0
+    else
+        warn "Asterisk não respondeu ao reload — pode estar parado."
+        return 2
+    fi
+}
+
+# Após reload, oferece restart dos consumidores AMI conhecidos que estão
+# ativos no systemd. Pergunta individualmente — operador decide caso a
+# caso. Daemons inativos/inexistentes são pulados silenciosamente. Falha
+# de um restart NÃO interrompe o loop (próximo daemon segue).
+#
+# Por que individual e não "restart all"?
+#   - issabeldialer: derruba campanha de discagem em curso (CallCenter)
+#   - fop2: painel de operador perde live status por segundos
+#   - cada equipe pode ter SLA distinto pra cada serviço
+#
+# Diagnóstico: mostra `systemctl status -n 3` (linhas recentes do journal)
+# antes de perguntar — operador vê se daemon está em loop de fail.
+restart_ami_consumers() {
+    cat <<EOF
+
+${C_BOLD}Restart dos consumidores AMI${C_RESET}
+──────────────────────────────
+Daemons com sessão AMI persistente podem estar mandando senha velha em
+loop após o reload. Esta etapa oferece restartar cada um individualmente.
+${C_DIM}Daemons inativos ou não-instalados são pulados.${C_RESET}
+
+EOF
+    local daemon any_active=0
+    for daemon in "${AMI_CONSUMERS_KNOWN[@]}"; do
+        # Pula daemons que nem existem como unit no systemd deste servidor
+        if ! systemctl list-unit-files "${daemon}.service" >/dev/null 2>&1; then
+            continue
+        fi
+        # Pula daemons que existem mas estão parados
+        if ! systemctl is-active --quiet "${daemon}.service" 2>/dev/null; then
+            info "${daemon}: inativo — pulando."
+            continue
+        fi
+        any_active=1
+        printf '\n%s%s%s status atual:\n' "${C_BOLD}" "${daemon}" "${C_RESET}"
+        systemctl status --no-pager -n 3 "${daemon}.service" 2>/dev/null \
+            | head -5 \
+            | sed 's/^/  /'
+        printf '\n'
+        if confirm "Reiniciar ${daemon}?"; then
+            if systemctl restart "${daemon}.service" 2>/dev/null; then
+                ok "${daemon} reiniciado."
+            else
+                warn "Falha ao reiniciar ${daemon} — confira 'systemctl status ${daemon}'."
+            fi
+        else
+            info "${daemon}: mantido como está."
+        fi
+    done
+
+    if [[ ${any_active} -eq 0 ]]; then
+        info "Nenhum consumidor AMI conhecido está ativo neste servidor."
+        info "Se você tem daemons customizados que falam AMI, restarte-os manualmente."
+    fi
+}
+
+# ════════════════════════════════════════════════════════════════════════
 #  Banner e menu
 # ════════════════════════════════════════════════════════════════════════
 
@@ -769,15 +929,24 @@ EOF
         # mas sem campo `presence`.
         php_set_ami_creds "${INSTALL_PATH}" "${ami_user}" "${ami_secret}"
 
-        # Reload do manager
-        info "Recarregando manager do Asterisk…"
-        if asterisk -rx "manager reload" >/dev/null 2>&1; then
-            ok "Manager recarregado."
-        else
-            warn "Asterisk não respondeu ao reload — pode estar parado."
+        # Reload seguro do manager — opt-in com snapshot de sessões ativas +
+        # aviso de impacto. Se operador pular, instruções pra rodar depois
+        # já são exibidas dentro de manager_safe_reload.
+        local reload_status=0
+        manager_safe_reload || reload_status=$?
+
+        # Pós-reload: oferece restart dos daemons conhecidos (issabeldialer,
+        # fop2) que podem ter senha cacheada em memória. Só faz sentido se o
+        # reload foi efetivo (status 0); se foi pulado, sessões AMI ainda
+        # não foram derrubadas → daemons continuam funcionando com a config
+        # em memória antiga, sem motivo pra restart proativo.
+        if [[ ${reload_status} -eq 0 ]]; then
+            restart_ami_consumers
         fi
 
-        # Show user pra confirmar
+        # Show user pra confirmar (sempre roda — mostra config carregada no
+        # Asterisk; se reload foi pulado, mostra estado anterior, que é
+        # informativo pro operador comparar com o que ele acabou de adicionar).
         info "Verificando usuário com 'manager show user ${ami_user}'…"
         local show_output
         if show_output=$(asterisk -rx "manager show user ${ami_user}" 2>&1); then

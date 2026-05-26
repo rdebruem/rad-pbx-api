@@ -2,6 +2,60 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — 2026-05-26
+
+### Mudado (breaking — destino do bloco AMI)
+
+- **`MANAGER_CONF` agora aponta pra `/etc/asterisk/manager_custom.conf`** em vez do `manager.conf` principal. Descoberta empírica durante o incidente do servidor Issabel do Renato (mesmo dia da v0.7.0): editar o `manager.conf` principal — **mesmo só com append, sem rodar `asterisk -rx "manager reload"`** — dispara reload silencioso que derruba a sessão AMI estabelecida do `dialerd` (CallCenter), causando loop de `failed to authenticate as 'admin'` sem ninguém ter pedido reload. Provavelmente o `asterisk` tem `inotify` watch no arquivo principal (`/proc/<asterisk_pid>/fd/26 -> anon_inode:inotify` foi observado).
+  - Validação empírica: testar `cat >> /etc/asterisk/manager_custom.conf` no estado de produção saudável (4 sessões admin ESTABLISHED) **não derrubou nenhuma sessão e não gerou nenhuma linha `failed to authenticate` no log**. Mesmo teste em `/etc/asterisk/manager.conf` derrubou uma sessão admin (FD 12) e iniciou o loop de fail.
+  - O `manager_custom.conf` é incluído via `#include manager_custom.conf` do `manager.conf` principal (config padrão do Issabel/FreePBX) e é o local que o template do Issabel oficialmente designa pra customizações — já vem populado com `[phpconfig]`, `[phpagi]`, `[a2billinguser]`, `[AstTapi]`, `[remote_mgr]`. Não é vigiado pelo mesmo watcher inotify.
+  - **Resultado prático:** a etapa "Configurar usuário AMI" do `install_contacts_api` (opção 1) agora **não derruba mais sessões AMI ativas no append**. A sessão de reload (`manager_safe_reload` da v0.7.0) continua sendo opt-in porque o reload em si ainda pode revelar divergência de senha entre `[admin]` e o que daemons têm cacheado — mas o problema de "dropar sessão sem reload" some.
+
+### Notas
+
+#### Contexto: como descobrimos
+
+A v0.7.0 (poucos minutos antes) presumia que o gatilho era o `asterisk -rx "manager reload"` que o installer chamava. Após restaurar snapshot, o Renato fez **só o append no `manager.conf` principal** (sem nem chamar reload) e o CallCenter caiu mesmo assim — provando que a edição em si dispara o reload. Hipótese da vez: usar o include `manager_custom.conf`. Teste empírico no snapshot saudável confirmou: append no custom **não derruba nenhuma sessão**. Daí a v0.8.0.
+
+A teoria de "reload do install.sh era o vilão" (v0.6.0 e v0.7.0) estava parcialmente certa — o reload tem o problema da divergência de senha — mas perdia o efeito do `inotify` que disparava reload **mesmo sem invocação explícita**. v0.8.0 ataca os dois: (1) edita no arquivo certo que não é vigiado, (2) mantém o reload opt-in da v0.7.0 + restart proativo de daemons pra cobrir o caso de divergência de senha quando o reload é manual.
+
+#### Backwards compatibility
+
+- **Quem rodou v0.7.0 ou anterior**: o bloco `[rad-localhost]` ficou no `manager.conf` principal. Na próxima rodada da v0.8.0, o `manager_section_exists` checa o `MANAGER_CONF` novo (custom), não acha lá → trata como instalação nova e adiciona no custom. O bloco antigo no `manager.conf` principal fica **órfão e ativo simultaneamente** (Asterisk aceita ambos — o último wins na ordem de leitura). Limpeza manual recomendada: `sed -i '/^\[rad-localhost\]/,/^\[/d' /etc/asterisk/manager.conf` ANTES de rodar a v0.8.0, ou ignorar (não causa problema funcional, só ocupa espaço).
+- **Servidores que nunca rodaram o installer**: nenhuma migração necessária.
+
+## [0.7.0] — 2026-05-26
+
+### Mudado (breaking — UX do flow de reload AMI)
+
+- **`asterisk -rx "manager reload"` agora é opt-in**, não mais automático. A v0.6.0 documentou no CHANGELOG (seção "Contexto: incidente failed to authenticate as 'admin'") que a causa raiz daquele incidente era cache stale de credenciais no `issabeldialer` — sintoma disparado *justamente pelo reload automático* que derruba sessões AMI ativas e força revalidação de senha em workers que tinham senha cacheada em memória. A v0.6.0 mitigou com aviso textual no resumo final; v0.7.0 promove a ação pra proativa antes do estrago acontecer.
+  - Nova função `manager_safe_reload()` (seção "Reload seguro do manager + restart de consumidores AMI"). Antes do reload:
+    1. Mostra snapshot de sessões AMI ativas via `asterisk -rx "manager show connected"` — operador vê EXATAMENTE quem vai ser derrubado.
+    2. Exibe aviso explícito sobre impacto + sintoma típico (`failed to authenticate as 'admin' ~1×/s` no `/var/log/asterisk/full`).
+    3. Pergunta `[s/N]` com default = N (mais seguro: preserva sessões ativas se operador não tiver certeza). Se recusar, devolve instruções pra rodar reload manualmente quando souber que pode derrubar conexões.
+  - Retorno discriminado: `0`=reload OK, `1`=operador pulou, `2`=Asterisk não respondeu. Caller usa pra decidir se vale rodar o helper de restart na sequência.
+
+### Adicionado (operacional — proativo)
+
+- **Novo helper `restart_ami_consumers()`** roda automaticamente após reload bem-sucedido. Itera sobre `AMI_CONSUMERS_KNOWN=(issabeldialer fop2)` e pra cada daemon que está ativo no systemd:
+  - Mostra `systemctl status -n 3` (últimas 3 linhas do journal) — operador vê na hora se está em loop de fail.
+  - Pergunta `[s/N]` individualmente — cada equipe pode ter SLA distinto pra cada serviço (dialer derruba campanha em curso, fop2 zera live status do painel de operador).
+  - Daemons inexistentes ou inativos são pulados silenciosamente — script funciona em Issabel mínimo (sem dialer/fop2) ou em Issabel completo.
+- **`asterisk` NÃO está na lista `AMI_CONSUMERS_KNOWN` de propósito** — restart do asterisk derruba todas as chamadas E todos os registros SIP, é último recurso operacional que o admin faz manualmente, não algo que deve aparecer num fluxo guiado por sim/não.
+
+### Notas
+
+#### Contexto: por que separamos reload e restart de daemons em etapas independentes
+
+O incidente da v0.6.0 mostrou três fases distintas: (1) instalador roda reload, (2) reload força revalidação de sessões AMI, (3) daemons com senha cacheada em memória começam loop de fail. O fix da v0.6.0 foi "avisar pro operador rodar `systemctl restart issabeldialer` depois". Mas o aviso aparecia DEPOIS do reload — quando o `/var/log/asterisk/full` já estava enchendo. O operador via o sintoma antes da solução.
+
+A v0.7.0 inverte a ordem: o operador vê **quem está conectado** antes de decidir o reload, e o restart dos daemons é oferecido **automaticamente na sequência** se o reload foi efetivo. Mesmo escopo de mudança (manager.conf inalterado, perms inalteradas, AMI bloco inalterado) com fluxo operacional incrementalmente mais defensivo.
+
+#### Backwards compatibility
+
+- **Quem já rodou v0.6.0**: nada a migrar. `manager_safe_reload` substitui o trecho de `asterisk -rx "manager reload"` direto, e funciona em qualquer servidor Issabel sem dependência nova.
+- **Quem roda v0.7.0 em ambiente onde `systemctl` não existe** (improvável em Issabel moderno, mas possível em servidores muito antigos): o loop de `restart_ami_consumers` falha silenciosamente (todos os `systemctl list-unit-files` retornam não-zero → daemons são pulados). Mensagem final "Nenhum consumidor AMI conhecido está ativo" aparece. Não bloqueia o resto da instalação.
+
 ## [0.6.0] — 2026-05-25
 
 ### Mudado (breaking — patch + UX)
