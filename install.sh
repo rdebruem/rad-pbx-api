@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.5.4"
+readonly SCRIPT_VERSION="0.6.0"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -105,6 +105,13 @@ readonly AMI_WRITE_PERMS="command,system,call"
 readonly LOG_DIR="/var/log"
 readonly LOG_FILE="${LOG_DIR}/${SCRIPT_NAME}.log"
 
+# Diretório central de backups — FORA do docroot do Apache.
+# Backups dentro de /var/www/html ficam acessíveis via HTTP como texto plano
+# (Apache não interpreta .bak.<UTC> como PHP), vazando RAD_API_KEY e AMI_SECRET
+# se alguém adivinhar o timestamp. Perms 0700 root:root impedem leitura por
+# outros users do servidor também. Veja helpers ensure_backup_dir/backup_path_for.
+readonly BACKUP_BASE_DIR="/var/backups/rad-api"
+
 # Cores ANSI — desligadas se stdout não é tty (ex.: redirect pra arquivo).
 if [[ -t 1 ]]; then
     readonly C_RED=$'\033[31m'
@@ -147,6 +154,29 @@ _log_to_file() {
     if [[ -w "${LOG_FILE}" ]]; then
         printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >> "${LOG_FILE}"
     fi
+}
+
+# Garante que o diretório central de backups existe com perms restritivas.
+# Idempotente: roda no início de cada operação que faz backup; se já existir,
+# no-op. Perms 0700 root:root garantem que mesmo outros users locais do
+# servidor não consigam ler os backups (que podem conter API keys, secrets,
+# código-fonte de módulos).
+ensure_backup_dir() {
+    if [[ ! -d "${BACKUP_BASE_DIR}" ]]; then
+        mkdir -p "${BACKUP_BASE_DIR}" \
+            || die "Falha ao criar ${BACKUP_BASE_DIR}."
+        chown root:root "${BACKUP_BASE_DIR}"
+        chmod 700 "${BACKUP_BASE_DIR}"
+        ok "Diretório de backups criado: ${BACKUP_BASE_DIR} (0700 root:root)"
+    fi
+}
+
+# Gera um path de backup datado dentro de BACKUP_BASE_DIR.
+# $1 = tag do artefato (ex: contacts.php, manager.conf, themes-rad_pbx).
+# Echo do path completo, ex: /var/backups/rad-api/contacts.php.20260525T160000Z
+backup_path_for() {
+    local tag="$1"
+    printf '%s/%s.%s' "${BACKUP_BASE_DIR}" "${tag}" "$(date -u +%Y%m%dT%H%M%SZ)"
 }
 
 info() {
@@ -479,13 +509,72 @@ manager_section_exists() {
     grep -qE "^\[${user}\]" "${MANAGER_CONF}"
 }
 
-# Adiciona seção [user] no final do manager.conf, com backup datado.
-# Não toca em seções existentes.
+# Remove a seção [user] inteira do manager.conf (do header até a próxima
+# [seção] ou EOF), e limpa comentários-marcador "Adicionado pelo SCRIPT_NAME v..."
+# órfãos (sem [seção] correspondente logo depois). Não cria backup — o caller
+# (manager_add_user) já criou um antes de chamar.
+#
+# Implementação via awk com 3 estados; trata defensivamente o caso de markers
+# empilhados de upgrades anteriores (observado num servidor real: 3 markers
+# v0.1.0/v0.1.2/v0.3.0 órfãos entre [admin] e [rad-localhost] após múltiplas
+# rodadas de versões pré-idempotência).
+#
+# $1 = user (nome do bloco AMI a remover, ex: rad-localhost)
+manager_remove_block() {
+    local user="$1" tmp_out
+    tmp_out=$(mktemp /tmp/manager.conf.XXXXXX) || die "Falha ao criar arquivo temporário."
+
+    awk -v user="${user}" -v script_name="${SCRIPT_NAME}" '
+        BEGIN {
+            in_target_block = 0
+            pending_marker = ""
+            user_re = "^\\[" user "\\]"
+            # Regex ASCII puro pra não depender de UTF-8 no awk
+            marker_re = "Adicionado pelo " script_name " v"
+        }
+        # Marker do nosso installer — guarda como pendente (sobrescreve anterior)
+        $0 ~ marker_re { pending_marker = $0; next }
+        # Header do bloco target → inicia skip; descarta marker pendente (era do bloco velho)
+        $0 ~ user_re { in_target_block = 1; pending_marker = ""; next }
+        # Header de OUTRA seção → sai do skip; emite marker pendente antes dela
+        /^\[[^]]+\]/ {
+            in_target_block = 0
+            if (pending_marker != "") { print pending_marker; pending_marker = "" }
+            print; next
+        }
+        # Dentro do bloco target → pula tudo
+        in_target_block == 1 { next }
+        # Linha não-vazia não-seção com marker pendente → marker é órfão, descarta
+        pending_marker != "" && NF > 0 { pending_marker = ""; print; next }
+        # Default (linhas vazias, linhas normais sem marker pendente) → imprime
+        { print }
+        # END: marker pendente no final do arquivo é órfão, descarta silenciosamente
+    ' "${MANAGER_CONF}" > "${tmp_out}" \
+        || { rm -f "${tmp_out}"; die "awk falhou ao limpar bloco [${user}] em ${MANAGER_CONF}."; }
+
+    # mv atomico no mesmo filesystem. Asterisk só relê manager.conf no 'manager reload',
+    # então não há janela de race com leitor concorrente.
+    mv "${tmp_out}" "${MANAGER_CONF}" \
+        || { rm -f "${tmp_out}"; die "Falha ao substituir ${MANAGER_CONF}."; }
+}
+
+# Adiciona OU substitui seção [user] em manager.conf, com backup datado.
+# Idempotente: se [user] já existe, substitui o bloco inteiro (preservando
+# todos os outros blocos via manager_remove_block) e limpa comentários-marcador
+# órfãos. Caso contrário, append simples no fim. Em ambos os casos, gera um
+# marker novo com SCRIPT_VERSION e UTC timestamp.
 manager_add_user() {
-    local user="$1" secret="$2" backup
-    backup="${MANAGER_CONF}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+    local user="$1" secret="$2" backup existed=0
+    ensure_backup_dir
+    backup=$(backup_path_for "manager.conf")
     cp -p "${MANAGER_CONF}" "${backup}" || die "Falha ao fazer backup de ${MANAGER_CONF}."
     ok "Backup salvo em ${backup}."
+
+    if manager_section_exists "${user}"; then
+        existed=1
+        info "Seção [${user}] já existe — substituindo bloco inteiro (idempotente)…"
+        manager_remove_block "${user}"
+    fi
 
     {
         printf '\n'
@@ -499,7 +588,11 @@ manager_add_user() {
         printf 'write = %s\n' "${AMI_WRITE_PERMS}"
     } >> "${MANAGER_CONF}"
 
-    ok "Seção [${user}] adicionada em ${MANAGER_CONF}."
+    if [[ ${existed} -eq 1 ]]; then
+        ok "Seção [${user}] substituída em ${MANAGER_CONF}."
+    else
+        ok "Seção [${user}] adicionada em ${MANAGER_CONF}."
+    fi
 }
 
 # ════════════════════════════════════════════════════════════════════════
@@ -567,8 +660,9 @@ install_contacts_api() {
             info "Cancelado pelo usuário. Nada foi alterado."
             return
         fi
+        ensure_backup_dir
         local existing_backup
-        existing_backup="${INSTALL_PATH}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+        existing_backup=$(backup_path_for "contacts.php")
         cp -p "${INSTALL_PATH}" "${existing_backup}"
         ok "Backup do PHP existente: ${existing_backup}"
     fi
@@ -648,13 +742,20 @@ EOF
         die "Nome do usuário AMI não pode ser vazio."
     fi
 
+    local skip_ami_setup=0
     if manager_section_exists "${ami_user}"; then
         warn "Já existe seção [${ami_user}] em ${MANAGER_CONF}."
-        if ! confirm "Pular criação (sim) ou abortar pra você revisar (não)?"; then
-            die "Abortado a pedido do usuário."
+        info "O instalador agora é idempotente: pode substituir o bloco inteiro com uma NOVA senha."
+        warn "ATENÇÃO: serviços que já estão usando essa senha (ex: dialerd da Issabel,"
+        warn "FOP2) vão precisar ser reiniciados depois pra pegar a senha nova."
+        if ! confirm "Substituir bloco existente com NOVA senha (sim) ou cancelar setup AMI (não)?"; then
+            info "Cancelado: bloco [${ami_user}] preservado, PHP não terá BLF habilitado."
+            skip_ami_setup=1
+            ami_secret=""
         fi
-        ami_secret=""  # sinal que pulamos
-    else
+    fi
+
+    if [[ ${skip_ami_setup} -eq 0 ]]; then
         ami_secret=$(prompt_secret "Senha do AMI (input escondido — deixe vazio pra gerar automaticamente)")
         if [[ -z "${ami_secret}" ]]; then
             ami_secret=$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-32)
@@ -663,9 +764,9 @@ EOF
         fi
         manager_add_user "${ami_user}" "${ami_secret}"
 
-        # Grava as MESMAS credenciais no PHP (ADR-0215) pra que o
-        # rad-contacts.php colete BLF/presença via AMI local. Sem isso,
-        # listagem de contatos funciona mas sem campo `presence`.
+        # Grava as MESMAS credenciais no PHP (ADR-0215) pra que o rad-contacts.php
+        # colete BLF/presença via AMI local. Sem isso, listagem de contatos funciona
+        # mas sem campo `presence`.
         php_set_ami_creds "${INSTALL_PATH}" "${ami_user}" "${ami_secret}"
 
         # Reload do manager
@@ -792,6 +893,16 @@ ${C_BOLD}Próximos passos operacionais:${C_RESET}
      • ${C_DIM}/var/log/httpd/access_log${C_RESET} — requests bem-sucedidas
      • ${C_DIM}/var/log/httpd/error_log${C_RESET} + ${C_DIM}ssl_error_log${C_RESET} — falhas
      • Auth Basic falha aparece como ${C_DIM}error_log:[rad-contacts] auth basic falhou: ramal=NNN${C_RESET}
+
+  3. ${C_BOLD}Reinicie consumidores AMI${C_RESET} pra eles pegarem a senha nova:
+     ${C_DIM}(Pular se o setup AMI foi cancelado acima.)${C_RESET}
+     • ${C_BOLD}systemctl restart issabeldialer${C_RESET}     ${C_DIM}— Issabel CallCenter (dialerd)${C_RESET}
+     • ${C_BOLD}systemctl restart fop2${C_RESET}              ${C_DIM}— FOP2 Operator Panel (se instalado)${C_RESET}
+     • ${C_BOLD}systemctl restart asterisk${C_RESET}          ${C_DIM}— opcional, força reload completo do manager.conf${C_RESET}
+
+     ${C_DIM}Por que: serviços AMI persistentes carregam a senha em memória no startup.
+     Se você alterou o bloco AMI sem reiniciá-los, eles continuam mandando a senha
+     antiga em loop (sintoma típico: NOTICE manager.c ~1×/s em /var/log/asterisk/full).${C_RESET}
 
 EOF
     _log_to_file "INSTALL OK: api_key=<redacted> ami_user=${ami_user}"
@@ -978,7 +1089,9 @@ EOF
 
     # ─── 3.5  Backup + instalação do tema ───
     if [[ -d "${THEME_INSTALL_DIR}" ]]; then
-        local theme_backup="${THEME_INSTALL_DIR}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+        ensure_backup_dir
+        local theme_backup
+        theme_backup=$(backup_path_for "themes-rad_pbx")
         info "Tema existente detectado em ${THEME_INSTALL_DIR} — movendo pra ${theme_backup}…"
         mv "${THEME_INSTALL_DIR}" "${theme_backup}" \
             || die "Falha ao mover tema existente pra backup."
@@ -1015,7 +1128,9 @@ EOF
     # em Issabel padrão). O favicon do Issabel de fábrica fica em
     # /var/www/html/favicon.ico com mode 644 e apache_owner — replicamos.
     if [[ -f "${FAVICON_INSTALL_PATH}" ]]; then
-        local favicon_backup="${FAVICON_INSTALL_PATH}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+        ensure_backup_dir
+        local favicon_backup
+        favicon_backup=$(backup_path_for "favicon.ico")
         info "favicon.ico existente detectado — backup em ${favicon_backup}…"
         cp -p "${FAVICON_INSTALL_PATH}" "${favicon_backup}" \
             || die "Falha ao fazer backup de ${FAVICON_INSTALL_PATH}."
@@ -1040,7 +1155,9 @@ EOF
     # Mesma fórmula do favicon: backup datado, apache_owner, mode 644, SELinux.
     # Defensivo: se /var/www/html/lang/ não existir (Issabel modificado), cria.
     if [[ -f "${BRLANG_INSTALL_PATH}" ]]; then
-        local brlang_backup="${BRLANG_INSTALL_PATH}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+        ensure_backup_dir
+        local brlang_backup
+        brlang_backup=$(backup_path_for "lang-br.lang")
         info "br.lang existente detectado — backup em ${brlang_backup}…"
         cp -p "${BRLANG_INSTALL_PATH}" "${brlang_backup}" \
             || die "Falha ao fazer backup de ${BRLANG_INSTALL_PATH}."
@@ -1063,7 +1180,9 @@ EOF
 
     # ─── 3.8  Backup + instalação do motd.sh ───
     if [[ -f "${MOTD_INSTALL_PATH}" ]]; then
-        local motd_backup="${MOTD_INSTALL_PATH}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+        ensure_backup_dir
+        local motd_backup
+        motd_backup=$(backup_path_for "motd.sh")
         info "motd.sh existente detectado — backup em ${motd_backup}…"
         cp -p "${MOTD_INSTALL_PATH}" "${motd_backup}" \
             || die "Falha ao fazer backup de ${MOTD_INSTALL_PATH}."
@@ -1111,7 +1230,8 @@ EOF
         dest_module_dir="${MODULES_INSTALL_DIR}/${module_name}"
 
         if [[ -d "${dest_module_dir}" ]]; then
-            module_backup="${dest_module_dir}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+            ensure_backup_dir
+            module_backup=$(backup_path_for "modules-${module_name}")
             info "Módulo '${module_name}' existente — movendo pra ${module_backup}…"
             mv "${dest_module_dir}" "${module_backup}" \
                 || die "Falha ao mover ${dest_module_dir} pra backup."

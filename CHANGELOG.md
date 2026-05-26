@@ -2,6 +2,41 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — 2026-05-25
+
+### Mudado (breaking — patch + UX)
+
+- **`manager_add_user` agora é idempotente (add-or-replace)**. Rodadas repetidas do installer NÃO empilham mais blocos `[<user>]` nem comentários-marcador no `manager.conf`. Se o bloco já existe, é **substituído inteiro** (preservando todos os outros blocos como `[general]`, `[admin]` e blocos AMI de terceiros tipo `[fop2_user]`) e quaisquer marcadores órfãos de versões anteriores (`; ─── Adicionado pelo rad-pbx-api-installer v... ───` sem bloco correspondente) são removidos.
+  - Nova função `manager_remove_block(user)` implementada via `awk` com 3 estados (in/out do bloco target + marker pendente). Algoritmo defensivo: usa regex ASCII puro pra não depender de UTF-8 no awk, e trata corretamente o caso onde múltiplos marcadores se acumularam de upgrades sucessivos.
+  - **Contexto histórico:** observado num servidor real após múltiplas rodadas das versões 0.1.0 → 0.5.4 sem cleanup: 3 marcadores órfãos (`v0.1.0`, `v0.1.2`, `v0.3.0`) sobreviveram entre `[admin]` e `[rad-localhost]`. A v0.6.0 limpa esses resíduos na primeira rodada que rodar.
+- **UX de "seção AMI já existe" mudou**. Antes: `Pular criação (sim) ou abortar pra você revisar (não)?` — escolher "sim" deixava o `manager.conf` com a senha antiga MAS o PHP com a senha nova (estado misto perigoso, causava failed-auth em loop até alguém reiniciar os serviços AMI). Agora: `Substituir bloco existente com NOVA senha (sim) ou cancelar setup AMI (não)?` — se cancela, **PHP também NÃO é tocado**, preservando o estado consistente atual.
+
+### Adicionado (segurança)
+
+- **Backups movidos pra fora do docroot do Apache**. Antes, todos os `.bak.<UTC-timestamp>` ficavam nos próprios diretórios dos artefatos — críticos como `/var/www/html/rad-api/contacts.php.bak.<UTC>` eram **servidos como texto pelo Apache** (extensão `.bak.<UTC>` não é interpretada como PHP) e expunham `RAD_API_KEY` e `AMI_SECRET` em claro pra quem adivinhasse o timestamp da URL. Agora **todos os 7 pontos de backup** centralizam em `/var/backups/rad-api/` com perms `0700 root:root`:
+  - Nova constante `BACKUP_BASE_DIR=/var/backups/rad-api`.
+  - Novos helpers `ensure_backup_dir` (cria com perms restritivas, idempotente) e `backup_path_for(tag)` (gera `${BACKUP_BASE_DIR}/<tag>.<UTC>`).
+  - Migrados: `contacts.php`, `manager.conf`, `themes-rad_pbx`, `favicon.ico`, `lang-br.lang`, `motd.sh`, `modules-{agent_console,campaign_monitoring}`.
+  - **Não migra backups antigos automaticamente.** Quem rodou v0.5.x ou anterior continua tendo `.bak.<UTC>` antigos em `/var/www/html/*` — remover manualmente é recomendado se a API key/AMI secret antigos forem sensíveis: `rm -rf /var/www/html/rad-api/*.bak.* /var/www/html/themes/*.bak.* /var/www/html/modules/*.bak.* /var/www/html/lang/*.bak.* /var/www/html/favicon.ico.bak.*`.
+
+### Adicionado (operacional)
+
+- **Aviso de restart de consumidores AMI no resumo final** da opção 1. Lista explicitamente `systemctl restart issabeldialer`, `systemctl restart fop2` e `systemctl restart asterisk` (opcional) — com explicação de por que (serviços AMI persistentes cachem a senha em memória no startup, então sem restart continuam mandando senha antiga em loop, sintoma típico `NOTICE manager.c ~1×/s` no `/var/log/asterisk/full`). Direcionamento direto fruto de incidente real diagnosticado durante o desenvolvimento desta versão — ver §Contexto abaixo.
+
+### Auditado (sem mudança de código)
+
+- **AMI perms (`AMI_READ_PERMS`, `AMI_WRITE_PERMS`) confirmadas cobrir todas as Actions emitidas hoje pelo `rad-contacts.php`**: `Login` (sem perm), `ExtensionStateList` (precisa `call` OU `reporting` — temos ambos), `Command "core show hints"` (precisa `write=command` — temos), `Logoff` (sem perm). Sobra `read=user` e `write=system,call` mantidos defensivamente pra futuras Actions admin (`Originate`, `Reload`) já documentadas no comentário existente do `install.sh`.
+
+### Notas
+
+#### Contexto: incidente "failed to authenticate as 'admin' ~1×/s"
+
+O trabalho de v0.6.0 foi disparado por um sintoma observado em produção: tcpdump no `:5038` mostrava `Action: Login / Username: admin` em loop, e o `/var/log/asterisk/full` enchia de `NOTICE manager.c authenticate: 127.0.0.1 failed to authenticate as 'admin'` ~1×/s. Hipótese inicial: `rad-contacts.php` tinha `'admin'` hardcoded em vez de usar a constante `AMI_USER` patcheada pelo installer.
+
+Investigação descartou todas as hipóteses do PHP/installer e fechou a causa raiz como **cache stale de credenciais nos workers persistentes do `dialerd`** (Issabel CallCenter). A senha em `call_center.valor_config` E em `manager.conf [admin]` estavam sincronizadas, mas os workers (PHP, processo master + forks) tinham carregado a senha antiga no startup e nunca recarregaram após alguém atualizar a senha do `[admin]`. **Fix:** `systemctl restart issabeldialer`. **Nenhum bug no `rad-pbx-api-installer` nem no `rad-contacts.php`.**
+
+Mas a investigação validou empiricamente o sintoma de empilhamento (3 marcadores órfãos no `manager.conf` da produção) e gerou o aprendizado "alertar sobre restart de consumidores AMI" — daí o escopo desta release.
+
 ## [0.5.4] — 2026-05-25
 
 ### Adicionado
