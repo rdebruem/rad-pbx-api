@@ -2,6 +2,16 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] — 2026-05-29
+
+### Adicionado (opção 4 — setter do padrão + sudoers, ADR-0112 P-5)
+
+- **A opção 4 agora instala o setter privilegiado `rad-pbx-set-pattern`** em `/usr/local/sbin/` (root:root 755) e configura o sudoers para a Platform gravar o padrão via SSH. É a contraparte do push implementado no backend (`SshService.execSetProtocolPattern`): a Platform faz `ssh <central> 'sudo -n /usr/local/sbin/rad-pbx-set-pattern' < pattern.json`.
+  - O setter lê o JSON do stdin, valida (`template` obrigatório, `sequenceStrategy` ∈ ulid/uuid/sequence) e grava `/etc/rad-pbx/protocol-pattern.json` atomicamente como root:asterisk 640. **Destino fixo** (não aceita path por argumento) — fronteira de segurança.
+  - Novo passo no instalador (`_proto_setup_sudoers`): pergunta o **usuário SSH** que a Platform usa nesta central e grava `/etc/sudoers.d/rad-pbx-protocol` com `<user> ALL=(root) NOPASSWD: /usr/local/sbin/rad-pbx-set-pattern`, **validado por `visudo -cf`** antes de instalar (440 root:root). Deixar o usuário vazio (conexão root) pula o sudoers. Mesmo modelo de privilégio do `fwconsole reload`.
+  - Baixa 4 artefatos (antes 3): AGI + core + stub + setter.
+- **`SCRIPT_VERSION` 0.10.0 → 0.11.0.**
+
 ## [0.10.0] — 2026-05-29
 
 ### Mudado (opção 4 — RAD-PROTOCOLO agora é central autônoma, ADR-0112)

@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.10.0"
+readonly SCRIPT_VERSION="0.11.0"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -133,11 +133,14 @@ readonly PROTO_FILES=(
   "${PROTO_REPO_DIR}/asterisk-agi/rad-protocolo.agi|/var/lib/asterisk/agi-bin/rad-protocolo.agi|asterisk:asterisk|755|rad-protocolo.agi"
   "${PROTO_REPO_DIR}/asterisk-agi/rad_protocolo_core.py|/var/lib/asterisk/agi-bin/rad_protocolo_core.py|asterisk:asterisk|644|rad_protocolo_core.py"
   "${PROTO_REPO_DIR}/asterisk-agi/extensions_rad.conf|/etc/asterisk/extensions_rad.conf|asterisk:asterisk|644|extensions_rad.conf"
+  "${PROTO_REPO_DIR}/asterisk-agi/rad-pbx-set-pattern|/usr/local/sbin/rad-pbx-set-pattern|root:root|755|rad-pbx-set-pattern"
 )
 readonly PROTO_CONFIG_DIR="/etc/rad-pbx"
 readonly PROTO_PATTERN_PATH="${PROTO_CONFIG_DIR}/protocol-pattern.json"
 readonly PROTO_DEFAULT_TEMPLATE="PROT-{YYYY}-{ULID}"
 readonly PROTO_AGI_PATH="/var/lib/asterisk/agi-bin/rad-protocolo.agi"
+readonly PROTO_SETTER_PATH="/usr/local/sbin/rad-pbx-set-pattern"
+readonly PROTO_SUDOERS_FILE="/etc/sudoers.d/rad-pbx-protocol"
 readonly PROTO_DIALPLAN_INCLUDE="extensions_rad.conf"
 readonly PROTO_EXTENSIONS_CONF="/etc/asterisk/extensions.conf"
 
@@ -1531,6 +1534,55 @@ PY
     ok "Padrão default: ${PROTO_PATTERN_PATH}  (${PROTO_DEFAULT_TEMPLATE}, 640 root:asterisk)"
 }
 
+# Configura o sudoers para o usuário SSH da Platform rodar o setter sem senha
+# (ADR-0112). Sem isso, o push do padrão pela Platform falha com "a password
+# is required". Idempotente: reescreve o arquivo. Pula se o usuário for vazio
+# (ex.: a Platform conecta como root, que não precisa de sudo).
+_proto_setup_sudoers() {
+    cat >&2 <<EOF
+
+${C_BOLD}Acesso do setter via sudo (ADR-0112)${C_RESET}
+─────────────────────────────────────
+A Platform grava o padrão na central rodando ${C_DIM}${PROTO_SETTER_PATH}${C_RESET}
+via SSH. Informe o usuário SSH que a Platform usa nesta central (o mesmo da
+Connection / do reload do dialplan) para liberar sudo NOPASSWD só desse setter.
+Deixe vazio se a Platform conecta como ${C_BOLD}root${C_RESET} (não precisa de sudo).
+
+EOF
+    local ssh_user
+    ssh_user=$(prompt "Usuário SSH da Platform (vazio = root, pula sudoers)" "")
+    if [[ -z "${ssh_user}" ]]; then
+        info "Sem usuário SSH informado — sudoers não configurado (assumindo conexão root)."
+        return
+    fi
+    if ! id "${ssh_user}" >/dev/null 2>&1; then
+        warn "Usuário '${ssh_user}' não existe no host. Pulei o sudoers — crie o usuário e rode a opção 4 de novo, ou ajuste ${PROTO_SUDOERS_FILE} manualmente."
+        return
+    fi
+
+    local tmp; tmp=$(mktemp)
+    {
+        printf '# RAD-PROTOCOLO (ADR-0112) — gerado por %s v%s\n' "${SCRIPT_NAME}" "${SCRIPT_VERSION}"
+        printf '# Libera a Platform a gravar o padrão via setter, sem senha.\n'
+        printf '%s ALL=(root) NOPASSWD: %s\n' "${ssh_user}" "${PROTO_SETTER_PATH}"
+    } > "${tmp}"
+
+    # Valida ANTES de instalar — um sudoers quebrado trava o sudo do host todo.
+    if command -v visudo >/dev/null 2>&1; then
+        if ! visudo -cf "${tmp}" >/dev/null 2>&1; then
+            rm -f "${tmp}"
+            die "Regra sudoers inválida (visudo -c falhou). Nada foi alterado."
+        fi
+    else
+        warn "visudo não encontrado — gravando sem validação prévia (revise ${PROTO_SUDOERS_FILE})."
+    fi
+
+    install -o root -g root -m 440 "${tmp}" "${PROTO_SUDOERS_FILE}" \
+        || { rm -f "${tmp}"; die "Falha ao instalar ${PROTO_SUDOERS_FILE}."; }
+    rm -f "${tmp}"
+    ok "sudoers: ${ssh_user} roda ${PROTO_SETTER_PATH} via sudo NOPASSWD (${PROTO_SUDOERS_FILE}, 440)."
+}
+
 # Smoke test pós-instalação. Não aborta a instalação se algo falhar (já está
 # instalado) — só avisa.
 _proto_smoke_test() {
@@ -1569,11 +1621,12 @@ ${C_BOLD}${C_GREEN}═══ RAD-PROTOCOLO instalado (central autônoma — ADR-
   ${C_BOLD}AGI${C_RESET}:        ${PROTO_AGI_PATH}
   ${C_BOLD}Dialplan${C_RESET}:   /etc/asterisk/extensions_rad.conf  ${C_DIM}(contexto [rad-protocolo])${C_RESET}
   ${C_BOLD}Padrão${C_RESET}:     ${PROTO_PATTERN_PATH}  ${C_DIM}(default: ${PROTO_DEFAULT_TEMPLATE})${C_RESET}
+  ${C_BOLD}Setter${C_RESET}:     ${PROTO_SETTER_PATH}  ${C_DIM}(escrita do padrão pela Platform via sudo)${C_RESET}
 
 ${C_BOLD}A central é independente da Platform.${C_RESET} O AGI lê o padrão do arquivo
 local a cada chamada — sem rede, sem spool. A Platform sobrescreve esse arquivo
-via SSH quando você salva um padrão na UI, e lê os registros do CDR (não há
-mais POST do AGI).
+via SSH (sudo no setter ${PROTO_SETTER_PATH}) quando você salva um padrão na UI,
+e lê os registros do CDR (não há mais POST do AGI).
 
 ${C_BOLD}${C_YELLOW}IMPORTANTE — o roteamento NÃO foi alterado.${C_RESET}
 O contexto [rad-protocolo] está instalado mas INERTE. Pra ativar numa rota,
@@ -1638,7 +1691,10 @@ install_rad_protocolo() {
     # ─── 4.5  Padrão default local (Platform sobrescreve por SSH depois) ───
     _proto_seed_pattern
 
-    # ─── 4.6  #include extensions_rad.conf (idempotente, com backup) ───
+    # ─── 4.6  sudoers do setter (push do padrão pela Platform) ───
+    _proto_setup_sudoers
+
+    # ─── 4.7  #include extensions_rad.conf (idempotente, com backup) ───
     if grep -qxF "#include ${PROTO_DIALPLAN_INCLUDE}" "${PROTO_EXTENSIONS_CONF}" 2>/dev/null; then
         ok "#include ${PROTO_DIALPLAN_INCLUDE} já presente em ${PROTO_EXTENSIONS_CONF}."
     else
@@ -1654,10 +1710,10 @@ install_rad_protocolo() {
         ok "#include ${PROTO_DIALPLAN_INCLUDE} adicionado a ${PROTO_EXTENSIONS_CONF}."
     fi
 
-    # ─── 4.7  Smoke test ───
+    # ─── 4.8  Smoke test ───
     _proto_smoke_test
 
-    # ─── 4.8  Instruções de wiring (manual — não tocamos em roteamento) ───
+    # ─── 4.9  Instruções de wiring (manual — não tocamos em roteamento) ───
     _proto_print_wiring
 
     rm -rf "${tmp}"; trap - EXIT
