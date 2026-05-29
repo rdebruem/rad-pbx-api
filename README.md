@@ -11,6 +11,7 @@ Um único script `install.sh` apresenta um menu com componentes que podem ser pr
 1. **API de contatos** — endpoint HTTP que o RAD Softphone consome pra puxar a lista de ramais da central.
 2. **Áudios PT-BR** — aplica o patch da comunidade [ibinetwork/IssabelBR](https://github.com/ibinetwork/IssabelBR) (prompts de URA, voicemail e sons do sistema em português brasileiro).
 3. **Tema RAD-PBX** — baixa o tema do repositório privado `rdebruem/rad-pbx-theme` e instala em `/var/www/html/themes/rad_pbx/`, substituindo também o `/var/www/html/favicon.ico`, o `/var/www/html/lang/br.lang` (ambos mode 644, owner apache), os módulos PHP `/var/www/html/modules/agent_console/` e `/var/www/html/modules/campaign_monitoring/` (dirs 755 / arquivos 644, owner apache — substituição completa, não merge), e o `/usr/local/sbin/motd.sh` (banner SSH) com permissões `-rwxr-xr-x root:root`.
+4. **RAD-PROTOCOLO (ADR-0110)** — número de protocolo de chamada. Baixa do `rdebruem/rad-ecosystem` o AGI Python (`/var/lib/asterisk/agi-bin/`), o serviço systemd de reconciliação de spool (`/opt/rad-pbx/bin/` + unit/timer) e o stub de dialplan (`/etc/asterisk/extensions_rad.conf`), cria os diretórios de config/cache/spool e gera `/etc/rad-pbx/protocol-agi.json` via prompts. **Não altera roteamento**: o contexto `[rad-protocolo]` fica inerte até a Inbound Route fazer `Gosub(rad-protocolo,s,1)` (wiring manual e validado — ver runbook `protocol-cutover` no vault). Requer `python3` (o de fábrica do CentOS 7, 3.6.8, basta).
 
 Mais opções entram conforme o ecossistema cresce.
 
@@ -18,8 +19,9 @@ Mais opções entram conforme o ecossistema cresce.
 
 - Servidor **Issabel** (ou Asterisk equivalente) com `bash 4+`, `curl`, `wget`, `openssl`, `tar` e `asterisk` CLI.
 - Acesso `root` (ou `sudo`).
-- Para a opção 1 (API de contatos): **token de acesso** ao repositório privado `rdebruem/rad-ecosystem`. Solicite ao mantenedor.
-- Para a opção 3 (Tema RAD-PBX): **token de acesso** ao repositório privado `rdebruem/rad-pbx-theme`. O mesmo `GITHUB_TOKEN` pode ser reusado entre opções 1 e 3 se o PAT tiver escopo nos dois repos.
+- Para as opções 1 (API de contatos) e 4 (RAD-PROTOCOLO): **token de acesso** ao repositório privado `rdebruem/rad-ecosystem`. Solicite ao mantenedor.
+- Para a opção 3 (Tema RAD-PBX): **token de acesso** ao repositório privado `rdebruem/rad-pbx-theme`. O mesmo `GITHUB_TOKEN` pode ser reusado entre as opções se o PAT tiver escopo nos repos.
+- Para a opção 4 (RAD-PROTOCOLO): `python3` instalado (CentOS 7: `yum install -y python3`), `systemd`, e os scripts do RAD-PROTOCOLO presentes na `main` do `rad-ecosystem`.
 
 ### Criando o GitHub PAT (fine-grained, recomendado)
 

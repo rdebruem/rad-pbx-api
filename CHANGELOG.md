@@ -2,6 +2,24 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — 2026-05-29
+
+### Adicionado (opção 4 — RAD-PROTOCOLO, ADR-0110)
+
+- **Nova opção 4 no menu: "Instalar RAD-PROTOCOLO (número de protocolo — ADR-0110)"** (`install_rad_protocolo`). Implementa o CP-8 do [ADR-0110](https://github.com/rdebruem/rad-ecosystem) — a camada de servidor da geração de número de protocolo de chamada (AGI Python + serviço systemd de reconciliação de spool + stub de dialplan).
+  - **Mesma UX de download das opções 1 e 3**: pede um GitHub PAT (`get_github_token`) e baixa via Contents API (`github_download_file`) só os 7 artefatos necessários do monorepo privado `rdebruem/rad-ecosystem@main`, sob `apps/rad-pbx-platform/scripts/`. **Pré-requisito**: esses arquivos precisam estar na `main` do monorepo.
+  - **Artefatos instalados** (com backup do anterior, owner/mode corretos): `rad-protocolo.agi` + `rad_protocolo_core.py` em `/var/lib/asterisk/agi-bin/` (asterisk:asterisk); `rad-pbx-protocol-sync` + `rad_protocolo_sync.py` em `/opt/rad-pbx/bin/` (root:root); `extensions_rad.conf` em `/etc/asterisk/`; unit+timer systemd em `/etc/systemd/system/`.
+  - **Diretórios criados** (idempotente): `/etc/rad-pbx` (750 root:asterisk), `/var/cache/rad-pbx` e `/var/spool/rad-pbx/protocol-records` (750 asterisk:asterisk), `/opt/rad-pbx/bin` (755 root:root).
+  - **Config `/etc/rad-pbx/protocol-agi.json`** (640 root:asterisk) gerada via prompts (baseUrl, token, TTL, timeouts, limites de backlog, verifyTls). Serializada por `python3` com `umask 077` — **o token nunca é logado nem passa por argv**.
+  - **`#include extensions_rad.conf`** adicionado ao `extensions.conf` de forma idempotente (grep antes de append, com backup).
+  - **Timer do sync** habilitado via `systemctl enable --now rad-pbx-protocol-sync.timer`.
+  - **Smoke test**: `dialplan reload` + `dialplan show rad-protocolo`, dry-run isolado do AGI (base_url vazia + cache/spool em tmp — **não posta na Platform nem polui o spool real**), e teste de conectividade/TLS/auth no `/api/v1/protocols/patterns/active`.
+
+### Decisões de design
+
+- **O instalador NÃO altera roteamento do FreePBX/Issabel.** Instala o contexto `[rad-protocolo]` como subrotina inerte (termina em `Return()`, sem `Answer()`); enquanto nenhuma Inbound Route fizer `Gosub(rad-protocolo,s,1)`, o impacto é zero. O wiring por-rota é manual e validado (canary), conforme o runbook `protocol-cutover`. Motivo: editar contextos gerados pelo FreePBX (versão antiga no fork do Issabel) é o real risco de quebra; mantê-lo inerte é seguro e reversível.
+- **`SCRIPT_VERSION` 0.8.0 → 0.9.0** (feature aditiva, sem breaking).
+
 ## [0.8.0] — 2026-05-26
 
 ### Mudado (breaking — destino do bloco AMI)
