@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.9.0"
+readonly SCRIPT_VERSION="0.10.0"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -115,37 +115,31 @@ readonly AMI_READ_PERMS="system,call,user,reporting"
 # então a superfície de risco continua nula em deployments típicos.
 readonly AMI_WRITE_PERMS="command,system,call"
 
-# ── RAD-PROTOCOLO (opção 4) — ADR-0110 ──────────────────────────────────
-# Número de protocolo de chamada. Arquitetura em 3 camadas: AGI Python no
-# Asterisk + serviço systemd de reconciliação de spool + backend NestJS
-# (este último fora do servidor Issabel). Os scripts vêm do monorepo
-# rad-ecosystem (mesmo SOURCE_REPO da opção 1), pasta abaixo.
+# ── RAD-PROTOCOLO (opção 4) — ADR-0112 (central autônoma) ───────────────
+# Número de protocolo de chamada. A central é INDEPENDENTE da Platform em
+# runtime: o AGI lê o padrão de um arquivo LOCAL (/etc/rad-pbx/protocol-pattern
+# .json, escrito pela Platform via SSH), materializa o valor e grava no
+# CDR(accountcode). Sem HTTP, sem spool, sem serviço de sync. Os scripts vêm
+# do monorepo rad-ecosystem (mesmo SOURCE_REPO da opção 1), pasta abaixo.
 #
 # IMPORTANTE: o instalador NÃO toca em roteamento do FreePBX/Issabel. Ele
 # instala o contexto [rad-protocolo] (subrotina inerte que termina em
-# Return()), o AGI, o sync e a config. Enquanto nenhuma Inbound Route fizer
-# Gosub(rad-protocolo,s,1), NADA acontece — zero impacto. O wiring por-rota
-# é passo manual validado (ver runbook protocol-cutover).
+# Return()), o AGI e um padrão default local. Enquanto nenhuma Inbound Route
+# fizer Gosub(rad-protocolo,s,1), NADA acontece — zero impacto. O wiring
+# por-rota é passo manual validado (ver runbook protocol-cutover).
 readonly PROTO_REPO_DIR="apps/rad-pbx-platform/scripts"
 # Arquivos baixados: "path-no-repo|destino|owner|mode|tag-de-backup"
 readonly PROTO_FILES=(
   "${PROTO_REPO_DIR}/asterisk-agi/rad-protocolo.agi|/var/lib/asterisk/agi-bin/rad-protocolo.agi|asterisk:asterisk|755|rad-protocolo.agi"
   "${PROTO_REPO_DIR}/asterisk-agi/rad_protocolo_core.py|/var/lib/asterisk/agi-bin/rad_protocolo_core.py|asterisk:asterisk|644|rad_protocolo_core.py"
   "${PROTO_REPO_DIR}/asterisk-agi/extensions_rad.conf|/etc/asterisk/extensions_rad.conf|asterisk:asterisk|644|extensions_rad.conf"
-  "${PROTO_REPO_DIR}/protocol-sync/rad-pbx-protocol-sync|/opt/rad-pbx/bin/rad-pbx-protocol-sync|root:root|755|rad-pbx-protocol-sync"
-  "${PROTO_REPO_DIR}/protocol-sync/rad_protocolo_sync.py|/opt/rad-pbx/bin/rad_protocolo_sync.py|root:root|644|rad_protocolo_sync.py"
-  "${PROTO_REPO_DIR}/protocol-sync/rad-pbx-protocol-sync.service|/etc/systemd/system/rad-pbx-protocol-sync.service|root:root|644|rad-pbx-protocol-sync.service"
-  "${PROTO_REPO_DIR}/protocol-sync/rad-pbx-protocol-sync.timer|/etc/systemd/system/rad-pbx-protocol-sync.timer|root:root|644|rad-pbx-protocol-sync.timer"
 )
 readonly PROTO_CONFIG_DIR="/etc/rad-pbx"
-readonly PROTO_CONFIG_PATH="${PROTO_CONFIG_DIR}/protocol-agi.json"
-readonly PROTO_CACHE_DIR="/var/cache/rad-pbx"
-readonly PROTO_SPOOL_DIR="/var/spool/rad-pbx/protocol-records"
-readonly PROTO_SYNC_BIN_DIR="/opt/rad-pbx/bin"
+readonly PROTO_PATTERN_PATH="${PROTO_CONFIG_DIR}/protocol-pattern.json"
+readonly PROTO_DEFAULT_TEMPLATE="PROT-{YYYY}-{ULID}"
 readonly PROTO_AGI_PATH="/var/lib/asterisk/agi-bin/rad-protocolo.agi"
 readonly PROTO_DIALPLAN_INCLUDE="extensions_rad.conf"
 readonly PROTO_EXTENSIONS_CONF="/etc/asterisk/extensions.conf"
-readonly PROTO_SYNC_TIMER="rad-pbx-protocol-sync.timer"
 
 # Log centralizado — todo output do script é também tee'd pra cá.
 readonly LOG_DIR="/var/log"
@@ -823,9 +817,9 @@ ${C_BOLD}Menu principal${C_RESET}
        └─ baixa o tema do repo privado ${THEME_REPO_OWNER}/${THEME_REPO_NAME} e
           substitui ${THEME_INSTALL_DIR}/ + ${MOTD_INSTALL_PATH}.
 
-  ${C_BOLD}4${C_RESET})  Instalar RAD-PROTOCOLO (número de protocolo — ADR-0110)
-       └─ AGI + serviço de sync + stub de dialplan. NÃO altera roteamento;
-          o contexto fica inerte até a Inbound Route fazer Gosub.
+  ${C_BOLD}4${C_RESET})  Instalar RAD-PROTOCOLO (número de protocolo — ADR-0112)
+       └─ central autônoma: AGI + stub de dialplan + padrão local. Sem rede,
+          sem sync. NÃO altera roteamento (inerte até a rota fazer Gosub).
 
   ${C_BOLD}q${C_RESET})  Sair
 
@@ -1506,72 +1500,35 @@ _proto_install_file() {
     ok "Instalado: ${dest}  (${owner}, ${mode})"
 }
 
-# Gera /etc/rad-pbx/protocol-agi.json via prompts. NUNCA loga o token.
-_proto_write_config() {
-    if [[ -f "${PROTO_CONFIG_PATH}" ]]; then
-        warn "Config já existe: ${PROTO_CONFIG_PATH}"
-        if ! confirm "Sobrescrever a config (sim) ou manter a atual (não)?"; then
-            info "Mantendo config existente."
+# Grava o padrão default local (/etc/rad-pbx/protocol-pattern.json). A Platform
+# sobrescreve esse arquivo via SSH ao salvar um padrão na UI (ADR-0112).
+# Idempotente: se já existir, pergunta antes de sobrescrever — não pisa num
+# padrão que a Platform já tenha enviado.
+_proto_seed_pattern() {
+    if [[ -f "${PROTO_PATTERN_PATH}" ]]; then
+        warn "Padrão local já existe: ${PROTO_PATTERN_PATH}"
+        if ! confirm "Sobrescrever pelo default (sim) ou manter o atual (não)?"; then
+            info "Mantendo o padrão existente."
             return
         fi
         ensure_backup_dir
-        local cb; cb=$(backup_path_for "protocol-agi.json")
-        cp -p "${PROTO_CONFIG_PATH}" "${cb}" && ok "Backup: ${cb}"
+        local pb; pb=$(backup_path_for "protocol-pattern.json")
+        cp -p "${PROTO_PATTERN_PATH}" "${pb}" && ok "Backup: ${pb}"
     fi
 
-    local base_url auth_token ttl http_to sync_to bk_count bk_age verify
-    base_url=$(prompt "URL base da Platform (ex: https://platform.cliente.local)" "")
-    while [[ -z "${base_url}" ]]; do
-        warn "A URL base é obrigatória."
-        base_url=$(prompt "URL base da Platform" "")
-    done
-    auth_token=$(prompt_secret "Token JWT do usuário de service (protocols.read+write)")
-    while [[ -z "${auth_token}" ]]; do
-        warn "O token é obrigatório."
-        auth_token=$(prompt_secret "Token JWT do usuário de service")
-    done
-    ttl=$(prompt "TTL do cache do pattern (segundos)" "300")
-    http_to=$(prompt "Timeout HTTP do AGI (ms)" "200")
-    sync_to=$(prompt "Timeout HTTP do sync (ms)" "5000")
-    bk_count=$(prompt "Alerta de backlog por contagem" "500")
-    bk_age=$(prompt "Alerta de backlog por idade (horas)" "24")
-    if confirm "Validar certificado TLS da Platform? (não = aceita self-signed)"; then
-        verify="true"
-    else
-        verify="false"
-    fi
-
-    # Serializa via python3 pra escapar com segurança (o token pode ter
-    # caracteres especiais). Valores passam por ENV — token nunca em argv/log.
-    local _um; _um=$(umask); umask 077
-    RAD_BASEURL="${base_url}" RAD_TOKEN="${auth_token}" RAD_TTL="${ttl}" \
-    RAD_HTTP_TO="${http_to}" RAD_SYNC_TO="${sync_to}" RAD_BK_COUNT="${bk_count}" \
-    RAD_BK_AGE="${bk_age}" RAD_VERIFY="${verify}" \
-    python3 - "${PROTO_CONFIG_PATH}" <<'PY' || die "Falha ao gravar a config."
+    local _um; _um=$(umask); umask 027
+    RAD_TEMPLATE="${PROTO_DEFAULT_TEMPLATE}" \
+    python3 - "${PROTO_PATTERN_PATH}" <<'PY' || die "Falha ao gravar o padrão default."
 import json, os, sys
-def _i(v, d):
-    try:
-        return int(v)
-    except Exception:
-        return d
-cfg = {
-    "baseUrl": os.environ["RAD_BASEURL"].rstrip("/"),
-    "authToken": os.environ["RAD_TOKEN"],
-    "cacheTtlSeconds": _i(os.environ.get("RAD_TTL"), 300),
-    "httpTimeoutMs": _i(os.environ.get("RAD_HTTP_TO"), 200),
-    "syncTimeoutMs": _i(os.environ.get("RAD_SYNC_TO"), 5000),
-    "backlogCount": _i(os.environ.get("RAD_BK_COUNT"), 500),
-    "backlogAgeHours": _i(os.environ.get("RAD_BK_AGE"), 24),
-    "verifyTls": os.environ.get("RAD_VERIFY", "true") != "false",
-}
+# version 0 = padrão default do instalador (ainda não veio da Platform).
+cfg = {"template": os.environ["RAD_TEMPLATE"], "sequenceStrategy": "ulid", "version": 0}
 with open(sys.argv[1], "w") as fh:
     fh.write(json.dumps(cfg, indent=2) + "\n")
 PY
     umask "${_um}"
-    chown root:asterisk "${PROTO_CONFIG_PATH}"
-    chmod 640 "${PROTO_CONFIG_PATH}"
-    ok "Config gravada: ${PROTO_CONFIG_PATH}  (640 root:asterisk)"
-    auth_token=""
+    chown root:asterisk "${PROTO_PATTERN_PATH}"
+    chmod 640 "${PROTO_PATTERN_PATH}"
+    ok "Padrão default: ${PROTO_PATTERN_PATH}  (${PROTO_DEFAULT_TEMPLATE}, 640 root:asterisk)"
 }
 
 # Smoke test pós-instalação. Não aborta a instalação se algo falhar (já está
@@ -1590,45 +1547,16 @@ _proto_smoke_test() {
         warn "dialplan reload falhou — recarregue manualmente: asterisk -rx 'dialplan reload'."
     fi
 
-    # 2. AGI em dry-run ISOLADO: base_url vazia + cache/spool em tmp, pra não
-    #    postar nada na Platform nem poluir o spool real.
-    local smoke; smoke=$(mktemp -d); chmod 777 "${smoke}"
-    local out
-    out=$(printf 'agi_uniqueid: install.smoke.1\nagi_channel: PJSIP/install-smoke\nagi_callerid: 0000000000\n\n' \
-        | sudo -u asterisk env \
-            RAD_PROTOCOL_BASE_URL="" \
-            RAD_PROTOCOL_CACHE_PATH="${smoke}/cache.json" \
-            RAD_PROTOCOL_SPOOL_DIR="${smoke}/spool" \
-            python3 "${PROTO_AGI_PATH}" 2>/dev/null || true)
+    # 2. AGI lê o padrão local instalado e emite PROTOCOL (sem rede).
+    local out val
+    out=$(printf 'agi_uniqueid: install.smoke.1\nagi_channel: PJSIP/install-smoke\n\n' \
+        | sudo -u asterisk python3 "${PROTO_AGI_PATH}" 2>/dev/null || true)
     if printf '%s' "${out}" | grep -q 'SET VARIABLE PROTOCOL'; then
-        ok "AGI executou e emitiu PROTOCOL (dry-run isolado, sem POST real)."
+        val=$(printf '%s' "${out}" | sed -n 's/.*SET VARIABLE PROTOCOL "\([^"]*\)".*/\1/p' | head -1)
+        ok "AGI gerou PROTOCOL=${val:-?} a partir do padrão local."
     else
-        warn "AGI não emitiu PROTOCOL no dry-run — depure: sudo -u asterisk python3 ${PROTO_AGI_PATH}"
+        warn "AGI não emitiu PROTOCOL — depure: sudo -u asterisk python3 ${PROTO_AGI_PATH}"
     fi
-    rm -rf "${smoke}"
-
-    # 3. Conectividade + TLS + auth com a Platform (usa a config recém-escrita).
-    local base tok url code
-    base=$(python3 -c "import json;print(json.load(open('${PROTO_CONFIG_PATH}')).get('baseUrl',''))" 2>/dev/null || true)
-    tok=$(python3 -c "import json;print(json.load(open('${PROTO_CONFIG_PATH}')).get('authToken',''))" 2>/dev/null || true)
-    if [[ -n "${base}" ]]; then
-        url="${base%/}/api/v1/protocols/patterns/active"
-        if [[ -n "${tok}" ]]; then
-            code=$(curl -sS -o /dev/null -m 8 -w '%{http_code}' \
-                -H "Authorization: Bearer ${tok}" "${url}" 2>/dev/null || echo "000")
-        else
-            code=$(curl -sS -o /dev/null -m 8 -w '%{http_code}' "${url}" 2>/dev/null || echo "000")
-        fi
-        case "${code}" in
-            200) ok "Platform respondeu 200 em /patterns/active (rede + TLS + auth OK)." ;;
-            401|403) warn "Platform respondeu ${code} — rede/TLS OK, mas token inválido/sem permissão." ;;
-            000) warn "Sem resposta da Platform (rede/DNS/firewall/TLS) — valide com protocol-preflight.sh." ;;
-            *)   warn "Platform respondeu ${code} — investigue." ;;
-        esac
-    else
-        warn "baseUrl vazio na config — pulei o teste de conectividade."
-    fi
-    tok=""
 }
 
 # Imprime instruções de wiring (NÃO automatizado — o instalador não toca em
@@ -1636,55 +1564,54 @@ _proto_smoke_test() {
 _proto_print_wiring() {
     cat <<EOF
 
-${C_BOLD}${C_GREEN}═══ RAD-PROTOCOLO instalado ═══${C_RESET}
+${C_BOLD}${C_GREEN}═══ RAD-PROTOCOLO instalado (central autônoma — ADR-0112) ═══${C_RESET}
 
   ${C_BOLD}AGI${C_RESET}:        ${PROTO_AGI_PATH}
-  ${C_BOLD}Sync${C_RESET}:       ${PROTO_SYNC_BIN_DIR}/rad-pbx-protocol-sync  ${C_DIM}(timer ${PROTO_SYNC_TIMER})${C_RESET}
   ${C_BOLD}Dialplan${C_RESET}:   /etc/asterisk/extensions_rad.conf  ${C_DIM}(contexto [rad-protocolo])${C_RESET}
-  ${C_BOLD}Config${C_RESET}:     ${PROTO_CONFIG_PATH}  ${C_DIM}(640 root:asterisk)${C_RESET}
-  ${C_BOLD}Spool${C_RESET}:      ${PROTO_SPOOL_DIR}
-  ${C_BOLD}Cache${C_RESET}:      ${PROTO_CACHE_DIR}
+  ${C_BOLD}Padrão${C_RESET}:     ${PROTO_PATTERN_PATH}  ${C_DIM}(default: ${PROTO_DEFAULT_TEMPLATE})${C_RESET}
+
+${C_BOLD}A central é independente da Platform.${C_RESET} O AGI lê o padrão do arquivo
+local a cada chamada — sem rede, sem spool. A Platform sobrescreve esse arquivo
+via SSH quando você salva um padrão na UI, e lê os registros do CDR (não há
+mais POST do AGI).
 
 ${C_BOLD}${C_YELLOW}IMPORTANTE — o roteamento NÃO foi alterado.${C_RESET}
 O contexto [rad-protocolo] está instalado mas INERTE. Pra ativar numa rota,
-faça a Inbound Route chamar a subrotina (ela seta o protocolo e RETORNA, sem
+faça a Inbound Route chamar a subrotina (seta o protocolo e RETORNA, sem
 Answer e sem mudar o fluxo):
 
   ${C_DIM}same => n,Gosub(rad-protocolo,s,1)${C_RESET}
 
 ${C_BOLD}Cutover recomendado (canary):${C_RESET}
   1. Ative o Gosub em UMA Inbound Route de teste.
-  2. Ligue pra ela; confirme o protocolo na UI (Protocolos Gerados) e no CDR.
+  2. Ligue pra ela; confirme o protocolo no CDR (accountcode) e no Dashboard.
   3. Só então propague pras demais rotas.
   Passo a passo completo: runbook ${C_BOLD}protocol-cutover${C_RESET} no vault.
 
-${C_BOLD}Operação:${C_RESET}
-  - Trocar formato: na UI (Padrões de Protocolo). Force refresh do cache:
-    ${C_DIM}rm -f ${PROTO_CACHE_DIR}/protocol-pattern.json${C_RESET}
-  - Drenar spool agora: ${C_DIM}systemctl start rad-pbx-protocol-sync.service${C_RESET}
-  - Backlog/diagnóstico: runbook ${C_BOLD}protocol-spool-backlog${C_RESET}.
+${C_BOLD}Trocar o formato:${C_RESET} na UI (Padrões de Protocolo) — a Platform reescreve
+${PROTO_PATTERN_PATH} via SSH. Pra testar local, edite o arquivo: a próxima
+chamada já usa o novo template.
 
 EOF
 }
 
 install_rad_protocolo() {
-    printf '\n%s═══ Instalação do RAD-PROTOCOLO (ADR-0110) ═══%s\n\n' "${C_BOLD}" "${C_RESET}"
+    printf '\n%s═══ Instalação do RAD-PROTOCOLO (ADR-0112 — central autônoma) ═══%s\n\n' "${C_BOLD}" "${C_RESET}"
 
     # ─── 4.0  Pré-requisitos específicos ───
-    require_cmd python3   "yum install -y python3   (CentOS 7 traz 3.6.8, suficiente)"
-    require_cmd systemctl "Este servidor precisa de systemd pro timer de sync."
+    require_cmd python3 "yum install -y python3   (CentOS 7 traz 3.6.8, suficiente)"
     require_cmd install
     if ! id asterisk >/dev/null 2>&1; then
         die "Usuário 'asterisk' não existe — esperado em servidor Issabel/Asterisk."
     fi
-    if ! python3 -c 'import ssl, secrets, json, urllib.request' >/dev/null 2>&1; then
-        die "python3 sem stdlib essencial (ssl/secrets/json/urllib) — instale python3-libs."
+    if ! python3 -c 'import json, secrets' >/dev/null 2>&1; then
+        die "python3 sem stdlib essencial (json/secrets) — instale python3-libs."
     fi
 
     # ─── 4.1  Token GitHub (mesma UX das opções 1 e 3) ───
     local token
     token=$(get_github_token "${SOURCE_REPO_OWNER_DEFAULT}" "${SOURCE_REPO_NAME_DEFAULT}" \
-        "os scripts do RAD-PROTOCOLO (ADR-0110)")
+        "os scripts do RAD-PROTOCOLO (ADR-0112)")
 
     # ─── 4.2  Download dos artefatos pra um tmp ───
     local tmp; tmp=$(mktemp -d)
@@ -1698,12 +1625,9 @@ install_rad_protocolo() {
     done
     token=""  # não é mais necessário
 
-    # ─── 4.3  Diretórios (idempotente) ───
-    mkdir -p "${PROTO_CONFIG_DIR}"   && chown root:asterisk "${PROTO_CONFIG_DIR}"     && chmod 750 "${PROTO_CONFIG_DIR}"
-    mkdir -p "${PROTO_SYNC_BIN_DIR}" && chown root:root "${PROTO_SYNC_BIN_DIR}"       && chmod 755 "${PROTO_SYNC_BIN_DIR}"
-    mkdir -p "${PROTO_CACHE_DIR}"    && chown asterisk:asterisk "${PROTO_CACHE_DIR}"  && chmod 750 "${PROTO_CACHE_DIR}"
-    mkdir -p "${PROTO_SPOOL_DIR}"    && chown -R asterisk:asterisk "$(dirname "${PROTO_SPOOL_DIR}")" && chmod 750 "${PROTO_SPOOL_DIR}"
-    ok "Diretórios prontos: ${PROTO_CONFIG_DIR}, ${PROTO_SYNC_BIN_DIR}, ${PROTO_CACHE_DIR}, ${PROTO_SPOOL_DIR}"
+    # ─── 4.3  Diretório de config/padrão (idempotente) ───
+    mkdir -p "${PROTO_CONFIG_DIR}" && chown root:asterisk "${PROTO_CONFIG_DIR}" && chmod 750 "${PROTO_CONFIG_DIR}"
+    ok "Diretório pronto: ${PROTO_CONFIG_DIR}  (750 root:asterisk)"
 
     # ─── 4.4  Instala os arquivos (backup do anterior se houver) ───
     for entry in "${PROTO_FILES[@]}"; do
@@ -1711,8 +1635,8 @@ install_rad_protocolo() {
         _proto_install_file "${tmp}/$(basename "${dest}")" "${dest}" "${owner}" "${mode}" "${tag}"
     done
 
-    # ─── 4.5  Config /etc/rad-pbx/protocol-agi.json (via prompts) ───
-    _proto_write_config
+    # ─── 4.5  Padrão default local (Platform sobrescreve por SSH depois) ───
+    _proto_seed_pattern
 
     # ─── 4.6  #include extensions_rad.conf (idempotente, com backup) ───
     if grep -qxF "#include ${PROTO_DIALPLAN_INCLUDE}" "${PROTO_EXTENSIONS_CONF}" 2>/dev/null; then
@@ -1730,22 +1654,14 @@ install_rad_protocolo() {
         ok "#include ${PROTO_DIALPLAN_INCLUDE} adicionado a ${PROTO_EXTENSIONS_CONF}."
     fi
 
-    # ─── 4.7  systemd: timer do sync ───
-    systemctl daemon-reload || warn "systemctl daemon-reload falhou."
-    if systemctl enable --now "${PROTO_SYNC_TIMER}" >/dev/null 2>&1; then
-        ok "Timer ${PROTO_SYNC_TIMER} habilitado e ativo."
-    else
-        warn "Não consegui habilitar ${PROTO_SYNC_TIMER} — verifique: systemctl status ${PROTO_SYNC_TIMER}"
-    fi
-
-    # ─── 4.8  Smoke test ───
+    # ─── 4.7  Smoke test ───
     _proto_smoke_test
 
-    # ─── 4.9  Instruções de wiring (manual — não tocamos em roteamento) ───
+    # ─── 4.8  Instruções de wiring (manual — não tocamos em roteamento) ───
     _proto_print_wiring
 
     rm -rf "${tmp}"; trap - EXIT
-    _log_to_file "INSTALL RAD-PROTOCOLO OK"
+    _log_to_file "INSTALL RAD-PROTOCOLO (autonomo) OK"
     ok "Pronto! Volte ao menu (Enter) ou Ctrl+C pra sair."
     read -r </dev/tty || true
     show_menu

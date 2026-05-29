@@ -2,6 +2,19 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] — 2026-05-29
+
+### Mudado (opção 4 — RAD-PROTOCOLO agora é central autônoma, ADR-0112)
+
+- **A opção 4 foi reescrita para o modelo de central autônoma do [ADR-0112](https://github.com/rdebruem/rad-ecosystem)**, que supersede a camada de runtime do ADR-0110. A central deixa de depender da Platform em tempo de execução: o AGI lê o padrão de um arquivo **local** (`/etc/rad-pbx/protocol-pattern.json`) e grava o protocolo no `CDR(accountcode)`. A Platform passa a **empurrar** o padrão por SSH e a **ler** os registros do CDR (não há mais POST do AGI).
+  - **Removido da instalação**: os prompts de `baseUrl`/token/timeouts/backlog; o serviço `rad-pbx-protocol-sync` (+ unit/timer systemd); os diretórios `/opt/rad-pbx/bin`, `/var/cache/rad-pbx` e `/var/spool/rad-pbx`; e o arquivo `protocol-agi.json`. A dependência de `systemd` também sai.
+  - **Agora a opção 4 instala apenas**: `rad-protocolo.agi` + `rad_protocolo_core.py` em `/var/lib/asterisk/agi-bin/`, o stub `extensions_rad.conf`, o `#include` idempotente, e **semeia um padrão default** em `/etc/rad-pbx/protocol-pattern.json` (`PROT-{YYYY}-{ULID}`, 640 root:asterisk) — a Platform sobrescreve via SSH ao salvar um padrão na UI.
+  - **Baixa só 3 artefatos** do `rad-ecosystem` (antes 7); os 4 do `protocol-sync` foram descontinuados.
+  - Smoke test simplificado: `dialplan reload` + `dialplan show rad-protocolo` + dry-run do AGI lendo o padrão local (sem teste de conectividade à Platform, que não se aplica mais).
+- **`SCRIPT_VERSION` 0.9.0 → 0.10.0.**
+
+> Migração: quem instalou a 0.9.0 num servidor pode rodar a 0.10.0 por cima (idempotente). Para limpeza, remover manualmente o que a 0.9.0 deixou e não é mais usado: `systemctl disable --now rad-pbx-protocol-sync.timer 2>/dev/null; rm -f /etc/systemd/system/rad-pbx-protocol-sync.{service,timer}; rm -rf /opt/rad-pbx /var/cache/rad-pbx /var/spool/rad-pbx /etc/rad-pbx/protocol-agi.json; systemctl daemon-reload`.
+
 ## [0.9.0] — 2026-05-29
 
 ### Adicionado (opção 4 — RAD-PROTOCOLO, ADR-0110)
