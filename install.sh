@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.14.0"
+readonly SCRIPT_VERSION="0.15.0"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -1910,14 +1910,29 @@ install_rad_protocolo() {
 #  Opção 6 — Instalar OpenVPN Client (conexão da central ao DC RAD)
 # ════════════════════════════════════════════════════════════════════════
 #
-# Baixa o template padrão do `rad-ecosystem` privado (setup-default.sh em
-# `apps/rad-pbx-platform/scripts/openvpn-client/`) e executa, passando o
-# slug do cliente e o path do .zip do pfSense via env vars. O template
-# contém a senha padrão do grupo RAD — por isso fica em repo privado.
+# Modelo "template compartilhado": o cert PKCS#12 e a TLS auth key são
+# iguais pra todas as centrais (o servidor OpenVPN do DC NÃO verifica CN
+# do cliente — a identificação real é via auth-user-pass). Por isso esta
+# opção pergunta APENAS o slug do cliente — não precisa de zip exportado
+# do pfSense por central.
 #
-# Pré-requisito operacional: o admin tem que ter feito scp do .zip do
-# pfSense (exportado via OpenVPN Client Export → Inline Configurations:
-# Archive) pra dentro do servidor ANTES de rodar esta opção.
+# Baixa do monorepo privado `rad-ecosystem` 4 arquivos:
+#   - setup-default.sh   → orquestrador (root do diretório do módulo)
+#   - template/rad-dc.p12       (binário, cert PKCS#12)
+#   - template/rad-dc-tls.key   (texto, TLS auth key)
+#   - template/client.conf      (texto, template do .conf com refs genéricas)
+#
+# Operação do admin no pfSense ao cadastrar cliente novo: criar user
+# `voip.${slug}` com a senha padrão do grupo. Sem gerar/exportar cert.
+
+# Paths dos 4 arquivos do template no monorepo privado, derivados de
+# OPENVPN_REPO_PATH (= .../openvpn-client/setup-default.sh).
+readonly OPENVPN_TEMPLATE_DIR_IN_REPO="${OPENVPN_REPO_PATH%/setup-default.sh}/template"
+readonly OPENVPN_TEMPLATE_FILES=(
+  "rad-dc.p12"
+  "rad-dc-tls.key"
+  "client.conf"
+)
 
 install_openvpn_client() {
     printf '\n%s═══ Instalação do OpenVPN Client (central → DC RAD) ═══%s\n\n' \
@@ -1926,8 +1941,8 @@ install_openvpn_client() {
     # ─── 6.0  Pré-checks ───
     require_cmd systemctl "este script depende de systemd (Issabel/CentOS 7 já tem)"
 
-    # ─── 6.1  Prompts: slug do cliente + path do zip ───
-    local client_slug zip_path
+    # ─── 6.1  Prompt: só o slug do cliente ───
+    local client_slug
     while :; do
         client_slug=$(prompt "Slug do cliente (lowercase + dígitos + hífen, ex: acme)" "")
         if [[ -z "${client_slug}" ]]; then
@@ -1940,41 +1955,25 @@ install_openvpn_client() {
         warn "Slug inválido: '${client_slug}'. Use só lowercase, dígitos e hífen (ex: acme, acme-rj)."
     done
 
-    while :; do
-        zip_path=$(prompt "Path do .zip do pfSense (ex: /root/${client_slug}.zip)" "")
-        if [[ -z "${zip_path}" ]]; then
-            warn "Path vazio. Tente de novo."
-            continue
-        fi
-        if [[ ! -f "${zip_path}" ]]; then
-            warn "Arquivo não encontrado: ${zip_path}"
-            continue
-        fi
-        # Sanity de conteúdo: vai falhar igual no template, mas é melhor avisar aqui
-        if command -v file >/dev/null 2>&1 && ! file -b "${zip_path}" 2>/dev/null | grep -qi 'zip archive'; then
-            warn "${zip_path} não parece um ZIP válido. Exporte do pfSense como 'Inline Configurations: Archive'."
-            if ! confirm "Continuar mesmo assim?"; then continue; fi
-        fi
-        break
-    done
-
-    # ─── 6.2  Mostra o que vai acontecer + confirmação ───
+    # ─── 6.2  Resumo + confirmação ───
     cat <<EOF
 ${C_BOLD}O que será aplicado${C_RESET}
 ────────────────────
   Cliente            : ${client_slug}
   Username VPN       : voip.${client_slug}
   Senha VPN          : ${C_DIM}(padrão do grupo — vem do template privado)${C_RESET}
-  Zip do pfSense     : ${zip_path}
   Diretório destino  : /etc/openvpn/client/
   Arquivo .conf      : /etc/openvpn/client/${client_slug}.conf
   Unit systemd       : openvpn-client@${client_slug}.service
-  Template do grupo  : ${C_DIM}${SOURCE_REPO_OWNER_DEFAULT}/${SOURCE_REPO_NAME_DEFAULT}@${SOURCE_REPO_BRANCH}:${OPENVPN_REPO_PATH}${C_RESET}
+  Template do grupo  : ${C_DIM}${SOURCE_REPO_OWNER_DEFAULT}/${SOURCE_REPO_NAME_DEFAULT}@${SOURCE_REPO_BRANCH}:${OPENVPN_REPO_PATH%/*}/${C_RESET}
 
-O template vai: instalar openvpn+unzip (via yum/dnf), extrair o zip, criar
-o arquivo auth com user+senha, renomear o .ovpn → ${client_slug}.conf, ajustar
-'auth-user-pass auth', remover linhas data-ciphers, e subir a unit. Após 5s,
-valida que a unit ficou ativa e que existe IP na interface tun.
+Pré-requisito no pfSense: o user 'voip.${client_slug}' tem que existir com
+a senha padrão do grupo. Sem exportar zip, sem cert por cliente.
+
+O instalador vai: baixar 4 arquivos do monorepo privado (orquestrador +
+cert.p12 + tls.key + template do .conf), instalar openvpn, copiar tudo
+pra /etc/openvpn/client/, criar auth file com user+senha e subir a unit.
+Após 5s, valida que a unit ficou ativa e que existe IP na interface tun.
 
 EOF
     if ! confirm "Baixar o template e aplicar agora?"; then
@@ -1984,34 +1983,51 @@ EOF
         return
     fi
 
-    # ─── 6.3  Token + download do template ───
-    local token script_path
+    # ─── 6.3  Token + download dos 4 arquivos ───
+    local token tmp script_path
     token=$(get_github_token "${SOURCE_REPO_OWNER_DEFAULT}" "${SOURCE_REPO_NAME_DEFAULT}" \
-        "o template padrão do OpenVPN Client")
+        "o template padrão do OpenVPN Client (orquestrador + cert + key + conf)")
 
-    script_path=$(mktemp /tmp/openvpn-setup.XXXXXX.sh)
-    trap 'rm -f "${script_path}"' EXIT
-    chmod 700 "${script_path}"
+    tmp=$(mktemp -d /tmp/openvpn-XXXXXX)
+    trap 'rm -rf "${tmp}"' EXIT
+    chmod 700 "${tmp}"
 
+    # Orquestrador
+    script_path="${tmp}/setup-default.sh"
     github_download_file "${token}" "${SOURCE_REPO_OWNER_DEFAULT}" \
         "${SOURCE_REPO_NAME_DEFAULT}" "${SOURCE_REPO_BRANCH}" \
         "${OPENVPN_REPO_PATH}" "${script_path}"
-    token=""  # zera da memória
 
     if ! head -1 "${script_path}" | grep -q '^#!.*bash'; then
-        rm -f "${script_path}"
-        die "Arquivo baixado não parece um shell script (falta shebang). Verifique se ${OPENVPN_REPO_PATH} existe no branch ${SOURCE_REPO_BRANCH}."
+        rm -rf "${tmp}"
+        die "setup-default.sh baixado não tem shebang bash. Verifique se ${OPENVPN_REPO_PATH} existe no branch ${SOURCE_REPO_BRANCH}."
     fi
 
-    # ─── 6.4  Executa o template com env vars ───
+    # Template (cert + tls key + conf) — vai pro mesmo tmp, plano (sem
+    # subpasta) porque o setup-default.sh espera ${TEMPLATE_DIR}/<file>.
+    local f
+    for f in "${OPENVPN_TEMPLATE_FILES[@]}"; do
+        github_download_file "${token}" "${SOURCE_REPO_OWNER_DEFAULT}" \
+            "${SOURCE_REPO_NAME_DEFAULT}" "${SOURCE_REPO_BRANCH}" \
+            "${OPENVPN_TEMPLATE_DIR_IN_REPO}/${f}" "${tmp}/${f}"
+    done
+    token=""  # zera da memória
+
+    # Sanity sizes: PKCS#12 e TLS key não podem ser arquivos vazios.
+    if [[ ! -s "${tmp}/rad-dc.p12" ]] || [[ ! -s "${tmp}/rad-dc-tls.key" ]]; then
+        rm -rf "${tmp}"
+        die "Algum artefato do template veio vazio. Verifique o branch ${SOURCE_REPO_BRANCH} do monorepo."
+    fi
+
+    # ─── 6.4  Executa o orquestrador com env vars ───
     info "Executando OpenVPN setup… (logs detalhados abaixo)"
     printf '%s\n' "${C_DIM}────────────────────────────────────────────────────────────${C_RESET}"
     local rc=0
-    CLIENT_SLUG="${client_slug}" ZIP_PATH="${zip_path}" \
+    CLIENT_SLUG="${client_slug}" TEMPLATE_DIR="${tmp}" \
         bash "${script_path}" || rc=$?
     printf '%s\n' "${C_DIM}────────────────────────────────────────────────────────────${C_RESET}"
 
-    rm -f "${script_path}"; trap - EXIT
+    rm -rf "${tmp}"; trap - EXIT
 
     if [[ ${rc} -ne 0 ]]; then
         err "OpenVPN setup falhou (exit ${rc}). Veja o output acima e os logs da unit."

@@ -2,6 +2,32 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.15.0] — 2026-05-30
+
+### Mudado (opção 6 — modelo "template compartilhado" do OpenVPN Client, sem zip)
+
+- **A opção 6 não pede mais o `.zip` do pfSense.** Análise de cert real (`openssl pkcs12 -info`): o `.ovpn` exportado pelo pfSense usa `auth-user-pass` + `verify-x509-name "RAD TECH"` — o cliente verifica o **servidor**, não o contrário. O servidor OpenVPN do DC RAD não valida CN do cliente, então o `.p12` (CA + cert + key) e o `-tls.key` podem ser **compartilhados** entre todas as centrais do grupo.
+- **Novo modelo de artefatos** em `rdebruem/rad-ecosystem` em `apps/rad-pbx-platform/scripts/openvpn-client/template/`:
+  - `rad-dc.p12` (binário, cert PKCS#12 sem senha; servidor OpenVPN do DC RAD ignora CN do cliente)
+  - `rad-dc-tls.key` (TLS auth key estática do servidor)
+  - `client.conf` (template do .conf com refs genéricas ao .p12/.key e remote do DC fixo)
+- **A opção 6 agora pergunta SÓ o slug do cliente**, baixa os 4 arquivos (orquestrador + 3 do template) via Contents API com `Accept: application/vnd.github.raw` (suporta binários até ~1MB), valida tamanho não-zero dos artefatos sensíveis, e executa o orquestrador passando `CLIENT_SLUG` + `TEMPLATE_DIR` por env. Sem unzip, sem regex pra editar `data-ciphers` (o template já vem limpo).
+- **`setup-default.sh` no monorepo privado foi simplificado de 8 → 6 passos**: install openvpn → stop unit → copy template → create auth → enable+start → validate.
+- **Operação no pfSense ao cadastrar cliente novo**: criar user `voip.${slug}` com a senha padrão. Sem export, sem download, sem scp.
+- **`SCRIPT_VERSION` 0.14.0 → 0.15.0.**
+
+### Removido
+
+- Prompt pelo path do `.zip` do pfSense na opção 6.
+- Constante `OPENVPN_REPO_PATH` continua existindo (path do orquestrador); nova `OPENVPN_TEMPLATE_DIR_IN_REPO` derivada dela aponta pra `template/`.
+- Pré-requisito de `unzip` na central (não precisa mais).
+
+### Limitação conhecida
+
+- Se algum cliente do grupo RAD for migrado pra um servidor pfSense configurado com **"Username as Common Name = on"**, o servidor passa a exigir cert único por user e o template compartilhado deixa de funcionar (TLS handshake failed). Solução nesse caso: voltar ao fluxo do zip per-cliente (reverter pra 0.14.0) ou desabilitar "Username as Common Name" no pfSense.
+
+> Migração: a 0.15.0 substitui a 0.14.0 — quem usou 0.14.0 não precisa reverter nada (a `auth`, `.conf` e unit já existentes continuam válidos). Rodar de novo na 0.15.0 sobrescreve os artefatos pelos do template compartilhado de forma idempotente.
+
 ## [0.14.0] — 2026-05-30
 
 ### Adicionado (nova opção 6 — OpenVPN Client via repo privado)
