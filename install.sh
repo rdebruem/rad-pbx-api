@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.16.1"
+readonly SCRIPT_VERSION="0.16.2"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -889,8 +889,13 @@ _write_ifcfg() {
 
     local uuid="" hwaddr=""
     if [[ -f "${ifcfg}" ]]; then
-        uuid=$(grep -E '^UUID=' "${ifcfg}" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"')
-        hwaddr=$(grep -E '^HWADDR=' "${ifcfg}" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"')
+        # `|| true` necessário: o script roda com `set -euo pipefail`, e se
+        # grep não encontrar a chave (ex.: ifcfg sem HWADDR), o pipe retorna
+        # 1 e o script morre silenciosamente DEPOIS do backup, ANTES do write.
+        # Foi o que aconteceu na v0.16.0 / 0.16.1 num Issabel cujo ifcfg
+        # original só tinha UUID, sem HWADDR.
+        uuid=$(grep -E '^UUID=' "${ifcfg}" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)
+        hwaddr=$(grep -E '^HWADDR=' "${ifcfg}" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)
     fi
 
     {

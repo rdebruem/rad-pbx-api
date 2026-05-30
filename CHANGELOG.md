@@ -2,6 +2,19 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.16.2] — 2026-05-30
+
+### Corrigido (opção 0 — `set -e` + `pipefail` matavam o script no `_write_ifcfg`)
+
+- **Root cause descoberto após teste do usuário com a 0.16.1**: o script ainda saía silenciosamente logo após o backup do ifcfg, sem aplicar nada — mesmo com `sync` e restart desacoplado em vigor. Investigação revelou que a v0.16.0 introduziu `_write_ifcfg` com:
+  ```bash
+  uuid=$(grep -E '^UUID=' "${ifcfg}" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"')
+  hwaddr=$(grep -E '^HWADDR=' "${ifcfg}" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"')
+  ```
+  No script principal (que tem `set -euo pipefail` desde sempre), se `grep` não encontrar a chave, retorna 1; o `pipefail` propaga e o `set -e` mata o script ali mesmo. **Sem erro impresso na tela** — `set -e` sai silencioso. O ifcfg típico do Issabel com NetworkManager (caso do servidor reportado) só tem `UUID` (sem `HWADDR`), então o segundo grep falhava sempre.
+- **Fix**: `|| true` no fim de cada pipe (`grep | head | cut | tr || true`). UUID/HWADDR continuam sendo capturados quando existem; quando não existem, retorna string vazia sem matar o script. As proteções da 0.16.1 (`sync`, `nohup setsid`, `nmcli connection reload`) continuam todas em vigor.
+- **`SCRIPT_VERSION` 0.16.1 → 0.16.2.**
+
 ## [0.16.1] — 2026-05-30
 
 ### Corrigido (opção 0 — mudanças se perdiam por reboot prematuro)
