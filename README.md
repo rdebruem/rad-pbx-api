@@ -8,6 +8,7 @@ Instalador interativo de componentes do ecossistema **RAD** no servidor **Issabe
 
 Um único script `install.sh` apresenta um menu com componentes que podem ser provisionados na Issabel:
 
+0. **Configurar central** — define IP estático, máscara, gateway, DNS e hostname do servidor. Usado na primeira instalação ou em troca de rede.
 1. **API de contatos** — endpoint HTTP que o RAD Softphone consome pra puxar a lista de ramais da central.
 2. **Áudios PT-BR** — aplica os áudios em português brasileiro nos prompts de URA, voicemail e sons do sistema (patch da comunidade [ibinetwork/IssabelBR](https://github.com/ibinetwork/IssabelBR)).
 3. **Tema RAD-PBX** — substitui o tema visual da Issabel pelo tema do grupo RAD (CSS, favicon, traduções pt-BR, módulos `agent_console` e `campaign_monitoring`, banner SSH).

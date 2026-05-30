@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.15.0"
+readonly SCRIPT_VERSION="0.16.0"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -807,17 +807,133 @@ EOF
 }
 
 # ════════════════════════════════════════════════════════════════════════
+#  Helpers de rede (usados pelo banner e pela opção 0)
+# ════════════════════════════════════════════════════════════════════════
+
+# Detecta a interface ativa (a que tem a rota default). Mais confiável que
+# adivinhar pelo nome — Issabel/CentOS 7 às vezes tem eth0, ens33, enp0s3,
+# em VMs antigas ou hardware customizado.
+_get_active_interface() {
+    ip route show default 2>/dev/null | awk '/^default/ {print $5; exit}'
+}
+
+# Pega o IP IPv4 da interface ativa (sem prefix).
+_get_current_ip() {
+    local iface
+    iface=$(_get_active_interface)
+    [[ -z "${iface}" ]] && return 0
+    ip -4 -o addr show "${iface}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1
+}
+
+# Valida formato IPv4 (octetos 0-255). Retorna 0/1.
+_validate_ipv4() {
+    local ip="$1"
+    [[ "${ip}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    local IFS='.'
+    local o
+    for o in ${ip}; do
+        (( o <= 255 )) || return 1
+    done
+    return 0
+}
+
+# Valida hostname RFC 1123 simplificado: letras, dígitos, hífen e ponto;
+# até 253 chars; primeiro e último char não pode ser hífen/ponto.
+_validate_hostname() {
+    local h="$1"
+    (( ${#h} >= 1 && ${#h} <= 253 )) || return 1
+    [[ "${h}" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]] || return 1
+    return 0
+}
+
+# Converte máscara dotted (ex: 255.255.255.0) para prefix CIDR (ex: 24).
+# Se já vier como prefix puro (ex: "24"), echoa de volta inalterado.
+# Retorna 1 se máscara inválida.
+_netmask_to_prefix() {
+    local mask="$1"
+    # CIDR direto: "24", "/24" etc.
+    if [[ "${mask}" =~ ^/?([0-9]{1,2})$ ]]; then
+        local p="${BASH_REMATCH[1]}"
+        (( p <= 32 )) || return 1
+        echo "${p}"
+        return 0
+    fi
+    # Dotted: 255.255.255.0
+    _validate_ipv4 "${mask}" || return 1
+    local IFS='.'
+    local octet prefix=0
+    for octet in ${mask}; do
+        case "${octet}" in
+            255) prefix=$((prefix + 8)) ;;
+            254) prefix=$((prefix + 7)) ;;
+            252) prefix=$((prefix + 6)) ;;
+            248) prefix=$((prefix + 5)) ;;
+            240) prefix=$((prefix + 4)) ;;
+            224) prefix=$((prefix + 3)) ;;
+            192) prefix=$((prefix + 2)) ;;
+            128) prefix=$((prefix + 1)) ;;
+            0)   prefix=$((prefix + 0)) ;;
+            *) return 1 ;;
+        esac
+    done
+    echo "${prefix}"
+}
+
+# Reescreve /etc/sysconfig/network-scripts/ifcfg-<iface> com config estática.
+# Preserva UUID se já existir (HWADDR é deixado pro NetworkManager / kernel
+# descobrir). Pós-condição: arquivo BOOTPROTO=static com IPADDR/PREFIX/GATEWAY
+# /DNS1/DNS2 e ONBOOT=yes.
+_write_ifcfg() {
+    local iface="$1" ip="$2" prefix="$3" gw="$4" dns1="$5" dns2="$6"
+    local ifcfg="/etc/sysconfig/network-scripts/ifcfg-${iface}"
+
+    local uuid="" hwaddr=""
+    if [[ -f "${ifcfg}" ]]; then
+        uuid=$(grep -E '^UUID=' "${ifcfg}" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"')
+        hwaddr=$(grep -E '^HWADDR=' "${ifcfg}" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"')
+    fi
+
+    {
+        printf 'TYPE=Ethernet\n'
+        printf 'BOOTPROTO=static\n'
+        printf 'DEFROUTE=yes\n'
+        printf 'PEERDNS=no\n'
+        printf 'IPV4_FAILURE_FATAL=no\n'
+        printf 'IPV6INIT=no\n'
+        printf 'NAME=%s\n' "${iface}"
+        printf 'DEVICE=%s\n' "${iface}"
+        printf 'ONBOOT=yes\n'
+        printf 'IPADDR=%s\n' "${ip}"
+        printf 'PREFIX=%s\n' "${prefix}"
+        printf 'GATEWAY=%s\n' "${gw}"
+        printf 'DNS1=%s\n' "${dns1}"
+        [[ -n "${dns2}" ]] && printf 'DNS2=%s\n' "${dns2}"
+        [[ -n "${uuid}" ]]   && printf 'UUID=%s\n' "${uuid}"
+        [[ -n "${hwaddr}" ]] && printf 'HWADDR=%s\n' "${hwaddr}"
+    } > "${ifcfg}"
+    chmod 644 "${ifcfg}"
+    chown root:root "${ifcfg}"
+}
+
+# ════════════════════════════════════════════════════════════════════════
 #  Banner e menu
 # ════════════════════════════════════════════════════════════════════════
 
 show_banner() {
     clear || true
+    local cur_host cur_ip cur_iface
+    cur_host=$(hostname 2>/dev/null || echo "?")
+    cur_iface=$(_get_active_interface)
+    cur_ip=$(_get_current_ip)
     cat <<EOF
 ${C_BOLD}╔══════════════════════════════════════════════════════════╗
 ║           RAD-PBX-API — Instalador Issabel               ║
 ║                                                          ║
 ║                  versão ${SCRIPT_VERSION}                            ║
 ╚══════════════════════════════════════════════════════════╝${C_RESET}
+
+  ${C_BOLD}Hostname:${C_RESET} ${cur_host}
+  ${C_BOLD}IP:${C_RESET}       ${cur_ip:-?}${cur_iface:+ ${C_DIM}(${cur_iface})${C_RESET}}
 
   Componentes do ecossistema RAD pra rodar no servidor Issabel.
 
@@ -831,6 +947,10 @@ show_menu() {
     show_banner
     cat <<EOF
 ${C_BOLD}Menu principal${C_RESET}
+
+  ${C_BOLD}0${C_RESET})  Configurar central (IP + hostname)
+       └─ define IP/máscara/gateway/DNS na interface ativa e seta o hostname.
+          Útil na primeira instalação do servidor ou troca de rede.
 
   ${C_BOLD}1${C_RESET})  Instalar API de contatos (rad-contacts.php)
        └─ endpoint HTTP que o RAD Softphone usa pra puxar ramais.
@@ -860,6 +980,7 @@ EOF
     local choice
     read -r -p "Escolha uma opção: " choice </dev/tty
     case "${choice}" in
+        0)  configure_central ;;
         1)  install_contacts_api ;;
         2)  install_ptbr_audios ;;
         3)  install_rad_pbx_theme ;;
@@ -870,6 +991,204 @@ EOF
         "") warn "Input vazio (provavelmente stdin do bash não está atrelado ao terminal — curl|sudo bash em alguns sudos). Use: wget https://raw.githubusercontent.com/rdebruem/rad-pbx-api/main/install.sh && chmod +x install.sh && sudo ./install.sh"; exit 1 ;;
         *)  warn "Opção inválida: '${choice}'"; sleep 1; show_menu ;;
     esac
+}
+
+# ════════════════════════════════════════════════════════════════════════
+#  Opção 0 — Configurar central (IP estático + hostname)
+# ════════════════════════════════════════════════════════════════════════
+#
+# Fluxo de primeira instalação do servidor Issabel. Não toca em nada da
+# Platform — só configura rede e identidade do host:
+#   - IP/máscara/gateway estáticos na interface ativa (default route)
+#   - DNS primário + secundário (defaults: 8.8.8.8 e 1.1.1.1)
+#   - hostname (persistente via hostnamectl + /etc/hosts)
+#
+# AVISO: se você está conectado via SSH no IP atual e o novo IP for
+# diferente, a sessão SSH cai quando a rede reinicia. Reconecte no novo
+# IP. Idealmente, rode esta opção do console físico/IPMI ou de uma sessão
+# tmux que sobreviva.
+
+configure_central() {
+    printf '\n%s═══ Configuração inicial da central (IP + hostname) ═══%s\n\n' \
+        "${C_BOLD}" "${C_RESET}"
+
+    # ─── 0.0  Detectar interface ativa + estado atual ───
+    local default_iface
+    default_iface=$(_get_active_interface)
+    if [[ -z "${default_iface}" ]]; then
+        warn "Nenhuma interface com rota default detectada — você terá que digitar manualmente."
+    fi
+
+    info "Interfaces de rede com endereço IPv4:"
+    ip -4 -o addr show 2>/dev/null \
+        | awk '$2!="lo" && $2!~/^virbr/ {printf "  %-12s %s\n", $2, $4}' \
+        | sed "s|${default_iface}|${default_iface} (default)|"
+    echo
+
+    # ─── 0.1  Interface a configurar ───
+    local iface
+    while :; do
+        iface=$(prompt "Interface a configurar" "${default_iface}")
+        if [[ -z "${iface}" ]]; then
+            warn "Interface vazia."
+            continue
+        fi
+        if ! ip link show "${iface}" >/dev/null 2>&1; then
+            warn "Interface '${iface}' não existe no host."
+            continue
+        fi
+        break
+    done
+
+    # Pegar estado atual da interface como defaults
+    local current_ip current_prefix current_gw
+    current_ip=$(ip -4 -o addr show "${iface}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    current_prefix=$(ip -4 -o addr show "${iface}" 2>/dev/null | awk '{print $4}' | cut -d/ -f2 | head -1)
+    current_gw=$(ip route show default 2>/dev/null | awk '/^default/ {print $3; exit}')
+
+    # ─── 0.2  Prompts: IP, máscara, gateway, DNS, hostname ───
+    local new_ip new_mask new_prefix new_gw new_dns1 new_dns2 new_hostname
+
+    while :; do
+        new_ip=$(prompt "Endereço IP" "${current_ip}")
+        _validate_ipv4 "${new_ip}" && break
+        warn "IP inválido: '${new_ip}'. Use formato IPv4 (ex: 192.168.1.100)."
+    done
+
+    while :; do
+        new_mask=$(prompt "Máscara (dotted ou CIDR, ex: 255.255.255.0 ou 24)" "${current_prefix:-24}")
+        if new_prefix=$(_netmask_to_prefix "${new_mask}"); then
+            break
+        fi
+        warn "Máscara inválida: '${new_mask}'."
+    done
+
+    while :; do
+        new_gw=$(prompt "Gateway" "${current_gw}")
+        _validate_ipv4 "${new_gw}" && break
+        warn "Gateway inválido: '${new_gw}'. Use formato IPv4."
+    done
+
+    while :; do
+        new_dns1=$(prompt "DNS primário" "8.8.8.8")
+        _validate_ipv4 "${new_dns1}" && break
+        warn "DNS inválido: '${new_dns1}'."
+    done
+
+    while :; do
+        new_dns2=$(prompt "DNS secundário (vazio = nenhum)" "1.1.1.1")
+        [[ -z "${new_dns2}" ]] && break
+        _validate_ipv4 "${new_dns2}" && break
+        warn "DNS inválido: '${new_dns2}'."
+    done
+
+    while :; do
+        new_hostname=$(prompt "Hostname (FQDN ou nome curto)" "$(hostname)")
+        _validate_hostname "${new_hostname}" && break
+        warn "Hostname inválido: '${new_hostname}'."
+    done
+
+    # ─── 0.3  Resumo + aviso + confirmação ───
+    local ssh_warn=""
+    if [[ -n "${SSH_CONNECTION:-}" ]] && [[ "${new_ip}" != "${current_ip}" ]]; then
+        ssh_warn="${C_YELLOW}⚠${C_RESET}  Você está em sessão SSH (origem: ${SSH_CONNECTION%% *}). O novo IP (${new_ip})
+   é diferente do atual (${current_ip}) — a conexão vai cair quando a
+   rede reiniciar. Reconecte em ${new_ip} depois."
+    fi
+
+    cat <<EOF
+
+${C_BOLD}Configuração que será aplicada${C_RESET}
+────────────────────────────────
+  Interface     : ${iface}
+  IP            : ${new_ip}/${new_prefix}  ${C_DIM}(atual: ${current_ip:-?}/${current_prefix:-?})${C_RESET}
+  Gateway       : ${new_gw}  ${C_DIM}(atual: ${current_gw:-?})${C_RESET}
+  DNS           : ${new_dns1}${new_dns2:+, ${new_dns2}}
+  Hostname      : ${new_hostname}  ${C_DIM}(atual: $(hostname))${C_RESET}
+
+${ssh_warn}
+
+EOF
+    if ! confirm "Aplicar agora?"; then
+        info "Cancelado. Voltando ao menu."
+        sleep 1
+        show_menu
+        return
+    fi
+
+    # ─── 0.4  Backup do ifcfg antigo ───
+    local ifcfg="/etc/sysconfig/network-scripts/ifcfg-${iface}"
+    if [[ -f "${ifcfg}" ]]; then
+        ensure_backup_dir
+        local bk; bk=$(backup_path_for "ifcfg-${iface}")
+        cp -p "${ifcfg}" "${bk}" && ok "Backup do ifcfg: ${bk}"
+    fi
+
+    # ─── 0.5  Reescrever ifcfg ───
+    _write_ifcfg "${iface}" "${new_ip}" "${new_prefix}" "${new_gw}" "${new_dns1}" "${new_dns2}"
+    ok "ifcfg reescrito: ${ifcfg}"
+
+    # ─── 0.6  Hostname (persistente + /etc/hosts) ───
+    local old_hostname; old_hostname=$(hostname)
+    if [[ "${new_hostname}" != "${old_hostname}" ]]; then
+        # Backup do /etc/hosts antes de mexer
+        if [[ -f /etc/hosts ]]; then
+            ensure_backup_dir
+            local hbk; hbk=$(backup_path_for "hosts")
+            cp -p /etc/hosts "${hbk}" && ok "Backup do /etc/hosts: ${hbk}"
+        fi
+
+        hostnamectl set-hostname "${new_hostname}" || warn "hostnamectl falhou (continuando)."
+
+        # Atualizar /etc/hosts: substitui ocorrências do hostname antigo
+        # na linha 127.0.0.1 / ::1, ou adiciona se ausente. Conservador —
+        # não mexe em outras linhas.
+        if [[ -f /etc/hosts ]]; then
+            if grep -qE "^[[:space:]]*127\.0\.0\.1.*\\b${old_hostname}\\b" /etc/hosts; then
+                sed -i "s/\\b${old_hostname}\\b/${new_hostname}/g" /etc/hosts
+            else
+                printf '127.0.0.1 %s\n' "${new_hostname}" >> /etc/hosts
+            fi
+        fi
+        ok "Hostname: ${old_hostname} → ${new_hostname}"
+    else
+        info "Hostname inalterado."
+    fi
+
+    # ─── 0.7  Reiniciar rede ───
+    info "Reiniciando rede... (se SSH cair, reconecte em ${new_ip})"
+    if systemctl list-unit-files 2>/dev/null | grep -q '^network\.service'; then
+        systemctl restart network 2>&1 | sed 's/^/  /' || warn "systemctl restart network falhou."
+    elif systemctl list-unit-files 2>/dev/null | grep -q '^NetworkManager\.service'; then
+        systemctl restart NetworkManager 2>&1 | sed 's/^/  /' || warn "NetworkManager restart falhou."
+    else
+        warn "Nenhum serviço de rede conhecido (network/NetworkManager). Reinicie manualmente."
+    fi
+
+    # ─── 0.8  Validar ───
+    sleep 3
+    local applied_ip
+    applied_ip=$(ip -4 -o addr show "${iface}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    if [[ "${applied_ip}" == "${new_ip}" ]]; then
+        ok "Interface ${iface} configurada com IP ${new_ip}/${new_prefix}."
+    else
+        warn "IP aplicado em ${iface}: '${applied_ip:-(nenhum)}' — esperado '${new_ip}'. Verifique manualmente:"
+        warn "  ip -4 addr show ${iface}"
+        warn "  cat ${ifcfg}"
+    fi
+
+    if ping -c 1 -W 2 "${new_gw}" >/dev/null 2>&1; then
+        ok "Gateway ${new_gw} responde (ping OK)."
+    else
+        warn "Gateway ${new_gw} não responde ao ping. Verifique cabeamento / VLAN / firewall."
+    fi
+
+    info "Hostname atual: $(hostname)"
+
+    _log_to_file "CONFIGURE CENTRAL OK (iface=${iface} ip=${new_ip}/${new_prefix} gw=${new_gw} dns=${new_dns1},${new_dns2} hostname=${new_hostname})"
+    ok "Pronto! Volte ao menu (Enter) ou Ctrl+C pra sair."
+    read -r </dev/tty || true
+    show_menu
 }
 
 # ════════════════════════════════════════════════════════════════════════
