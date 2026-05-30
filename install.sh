@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.11.0"
+readonly SCRIPT_VERSION="0.12.0"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -1648,17 +1648,69 @@ chamada já usa o novo template.
 EOF
 }
 
+# Detecta o gerenciador de pacotes disponível. Echo: "dnf"|"yum"|"apt"|"".
+_pkg_mgr() {
+    if command -v dnf >/dev/null 2>&1; then echo dnf
+    elif command -v yum >/dev/null 2>&1; then echo yum
+    elif command -v apt-get >/dev/null 2>&1; then echo apt
+    else echo ""; fi
+}
+
+# Instala um pacote pelo gerenciador detectado. $1=nome do pacote.
+# Retorna 127 se nenhum gerenciador for encontrado.
+_pkg_install() {
+    local pkg="$1" mgr; mgr=$(_pkg_mgr)
+    case "${mgr}" in
+        dnf) dnf install -y "${pkg}" ;;
+        yum) yum install -y "${pkg}" ;;
+        apt) apt-get update -y && apt-get install -y "${pkg}" ;;
+        *)   return 127 ;;
+    esac
+}
+
+# Garante as dependências da opção 4 (ADR-0112). Tenta INSTALAR o que faltar
+# em vez de só abortar — python3 (3.6+) cobre AGI/core/setter; json/secrets vêm
+# no python3-libs. Idempotente: nada a fazer se já presentes. Roda como root
+# (o instalador é invocado via sudo), então o yum/dnf/apt funciona.
+_proto_ensure_deps() {
+    printf '\n%s── Dependências ──%s\n' "${C_BOLD}" "${C_RESET}"
+
+    # coreutils 'install' — praticamente sempre presente; se faltar é grave.
+    if ! command -v install >/dev/null 2>&1; then
+        info "coreutils ('install') ausente — instalando…"
+        _pkg_install coreutils || die "Falha ao instalar coreutils. Instale manualmente e rode de novo."
+    fi
+
+    # 1. python3 — instala se faltar.
+    if command -v python3 >/dev/null 2>&1; then
+        ok "python3 presente: $(python3 --version 2>&1)"
+    else
+        local mgr; mgr=$(_pkg_mgr)
+        [[ -z "${mgr}" ]] && die "python3 ausente e nenhum gerenciador de pacotes (yum/dnf/apt) encontrado — instale python3 manualmente."
+        info "python3 ausente — instalando via ${mgr}…"
+        _pkg_install python3 || die "Falha ao instalar python3 via ${mgr}. Instale manualmente: ${mgr} install -y python3"
+        command -v python3 >/dev/null 2>&1 || die "python3 ainda ausente após a instalação — verifique o repositório de pacotes do servidor."
+        ok "python3 instalado: $(python3 --version 2>&1)"
+    fi
+
+    # 2. stdlib essencial (json/secrets). 'secrets' exige 3.6+ (CentOS 7 = 3.6.8);
+    #    o teste de import valida a versão de quebra.
+    if ! python3 -c 'import json, secrets' >/dev/null 2>&1; then
+        info "stdlib json/secrets ausente — tentando instalar python3-libs…"
+        _pkg_install python3-libs || warn "Não consegui instalar python3-libs automaticamente."
+        python3 -c 'import json, secrets' >/dev/null 2>&1 \
+            || die "python3 sem stdlib essencial (json/secrets). Instale python3-libs (ou um python3 ≥ 3.6) e rode de novo."
+    fi
+    ok "stdlib json/secrets OK."
+}
+
 install_rad_protocolo() {
     printf '\n%s═══ Instalação do RAD-PROTOCOLO (ADR-0112 — central autônoma) ═══%s\n\n' "${C_BOLD}" "${C_RESET}"
 
-    # ─── 4.0  Pré-requisitos específicos ───
-    require_cmd python3 "yum install -y python3   (CentOS 7 traz 3.6.8, suficiente)"
-    require_cmd install
+    # ─── 4.0  Pré-requisitos específicos (instala o que faltar) ───
+    _proto_ensure_deps
     if ! id asterisk >/dev/null 2>&1; then
         die "Usuário 'asterisk' não existe — esperado em servidor Issabel/Asterisk."
-    fi
-    if ! python3 -c 'import json, secrets' >/dev/null 2>&1; then
-        die "python3 sem stdlib essencial (json/secrets) — instale python3-libs."
     fi
 
     # ─── 4.1  Token GitHub (mesma UX das opções 1 e 3) ───

@@ -2,6 +2,17 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] — 2026-05-30
+
+### Adicionado (opção 4 — auto-instalação de dependências)
+
+- **A opção 4 agora INSTALA as dependências que faltarem em vez de só abortar.** Antes, um servidor sem `python3` (caso comum no Issabel/CentOS 7 recém-provisionado) parava com `✗ Comando 'python3' não encontrado. Instale antes: yum install -y python3`. Agora o instalador detecta o gerenciador de pacotes e resolve sozinho.
+  - Novos helpers `_pkg_mgr` (detecta `dnf`/`yum`/`apt-get`) e `_pkg_install` (instala um pacote pelo gerenciador detectado).
+  - Nova função `_proto_ensure_deps` (passo 4.0): garante `coreutils` (`install`), `python3` e a stdlib essencial (`json`/`secrets` — o import valida 3.6+ de quebra), instalando `python3` e `python3-libs` quando ausentes. Idempotente; só age no que falta. Como o instalador roda via `sudo`, o `yum`/`dnf`/`apt` funciona.
+  - O check de usuário `asterisk` **continua um erro fatal** (não dá pra "instalar" um servidor Asterisk — se o usuário não existe, não é uma central).
+  - Mensagens claras de fallback: se não houver gerenciador de pacotes, ou se a instalação falhar, aborta com o comando manual exato.
+- **`SCRIPT_VERSION` 0.11.0 → 0.12.0.**
+
 ## [0.11.0] — 2026-05-29
 
 ### Adicionado (opção 4 — setter do padrão + sudoers, ADR-0112 P-5)
