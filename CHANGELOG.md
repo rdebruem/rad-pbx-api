@@ -2,6 +2,26 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] — 2026-05-30
+
+### Adicionado (nova opção 4 — RAD Connector via repo privado)
+
+- **Nova opção 4 no menu: "Instalar RAD Connector (preparo da central pra Platform)"** (`install_rad_connector`). Provisiona os 4 usuários técnicos que o backend do RAD PBX Platform usa pra falar com a central (SSH, AMI, MariaDB, ECCP), aplicando o **template padrão do grupo RAD** — mesmo script que a Central de Ajuda do RAD PBX Platform gera dinamicamente quando o admin escolhe "usar valores padrão".
+  - **O script de preparo vive no monorepo PRIVADO `rdebruem/rad-ecosystem`** em `apps/rad-pbx-platform/scripts/rad-connector/setup-default.sh`, porque contém credenciais técnicas compartilhadas (usuários e senha do grupo RAD). Este repo é público, então o template NÃO pode ser embutido inline. A opção 4 baixa via Contents API com GitHub PAT (mesma UX das opções 1 e 5).
+  - **Pré-flight**: existência do usuário `asterisk`, `/etc/asterisk/manager.conf` presente, cliente `mysql` instalado. Aviso explícito antes de confirmar: o template default usa BACKEND_IP=0.0.0.0 (libera AMI 5038 e MariaDB 3306 pra qualquer origem) — pressupõe rede confiável + firewall externo. Pra restringir, regere o script pela UI da Platform.
+  - **Sanity check** pós-download: rejeita arquivo sem shebang `#!.*bash` (defesa contra ler texto bruto da API REST quando o path está errado).
+  - **Token zerado em memória** logo após o download.
+  - **Cleanup garantido** do arquivo temp (`trap rm`), inclusive em falha.
+  - O script em si é idempotente (chpasswd; bloco AMI removido+reescrito; `GRANT USAGE ... IDENTIFIED BY` + `SET PASSWORD` em MariaDB 5.5→MySQL 8; `ON DUPLICATE KEY UPDATE` no ECCP; detecção da coluna de hash entre `md5_password`/`password`/`secret`/`passwd`).
+- **A antiga opção 4 (RAD-PROTOCOLO) virou opção 5.** Nenhuma mudança funcional — só o número e os comentários internos (`5.0`…`5.9`).
+- **`SCRIPT_VERSION` 0.12.0 → 0.13.0.**
+
+### Segurança
+
+- **NADA de credenciais hardcoded neste repo público.** O instalador conhece apenas o **path** do template no monorepo privado (`CONNECTOR_REPO_PATH`); usuários, senha e BACKEND_IP ficam no template (privado). Quem clona este repo sem o PAT do `rad-ecosystem` consegue rodar as opções 2 (áudios PT-BR, fonte pública) mas não as 1/3/4/5.
+
+> Migração: quem usava `4` no menu pra rodar o RAD-PROTOCOLO precisa digitar `5` na 0.13.0. Não há mudança em arquivos instalados. Pra rodar a opção 4 nova: PAT com `Contents: Read-only` em `rdebruem/rad-ecosystem`.
+
 ## [0.12.0] — 2026-05-30
 
 ### Adicionado (opção 4 — auto-instalação de dependências)
