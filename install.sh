@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.13.0"
+readonly SCRIPT_VERSION="0.14.0"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -128,6 +128,14 @@ readonly AMI_WRITE_PERMS="command,system,call"
 # o admin gera via UI da Platform (Central de Ajuda → RAD Connector) e roda
 # o que sai de lá — fora deste fluxo.
 readonly CONNECTOR_REPO_PATH="apps/rad-pbx-platform/scripts/rad-connector/setup-default.sh"
+
+# ── OPENVPN-CLIENT (opção 6) — conexão da central ao DC RAD ─────────────
+# Instala o cliente OpenVPN no servidor Issabel e conecta-o à VPN do data
+# center de controle da RAD (onde vive a Platform). O perfil VPN vem do
+# pfSense do DC (.zip exportado manualmente pelo admin); a senha de auten-
+# ticação é a senha padrão compartilhada do grupo RAD — por isso o script
+# de setup vive no monorepo privado, igual ao RAD Connector.
+readonly OPENVPN_REPO_PATH="apps/rad-pbx-platform/scripts/openvpn-client/setup-default.sh"
 
 # ── RAD-PROTOCOLO (opção 5) — ADR-0112 (central autônoma) ───────────────
 # Número de protocolo de chamada. A central é INDEPENDENTE da Platform em
@@ -842,6 +850,10 @@ ${C_BOLD}Menu principal${C_RESET}
        └─ central autônoma: AGI + stub de dialplan + padrão local. Sem rede,
           sem sync. NÃO altera roteamento (inerte até a rota fazer Gosub).
 
+  ${C_BOLD}6${C_RESET})  Instalar OpenVPN Client (conexão da central ao DC RAD)
+       └─ instala openvpn + extrai perfil do pfSense (.zip) + sobe a unit
+          openvpn-client@{cliente}.service. Conecta o servidor à VPN do DC.
+
   ${C_BOLD}q${C_RESET})  Sair
 
 EOF
@@ -853,6 +865,7 @@ EOF
         3)  install_rad_pbx_theme ;;
         4)  install_rad_connector ;;
         5)  install_rad_protocolo ;;
+        6)  install_openvpn_client ;;
         q|Q) info "Saindo."; exit 0 ;;
         "") warn "Input vazio (provavelmente stdin do bash não está atrelado ao terminal — curl|sudo bash em alguns sudos). Use: wget https://raw.githubusercontent.com/rdebruem/rad-pbx-api/main/install.sh && chmod +x install.sh && sudo ./install.sh"; exit 1 ;;
         *)  warn "Opção inválida: '${choice}'"; sleep 1; show_menu ;;
@@ -1888,6 +1901,131 @@ install_rad_protocolo() {
 
     rm -rf "${tmp}"; trap - EXIT
     _log_to_file "INSTALL RAD-PROTOCOLO (autonomo) OK"
+    ok "Pronto! Volte ao menu (Enter) ou Ctrl+C pra sair."
+    read -r </dev/tty || true
+    show_menu
+}
+
+# ════════════════════════════════════════════════════════════════════════
+#  Opção 6 — Instalar OpenVPN Client (conexão da central ao DC RAD)
+# ════════════════════════════════════════════════════════════════════════
+#
+# Baixa o template padrão do `rad-ecosystem` privado (setup-default.sh em
+# `apps/rad-pbx-platform/scripts/openvpn-client/`) e executa, passando o
+# slug do cliente e o path do .zip do pfSense via env vars. O template
+# contém a senha padrão do grupo RAD — por isso fica em repo privado.
+#
+# Pré-requisito operacional: o admin tem que ter feito scp do .zip do
+# pfSense (exportado via OpenVPN Client Export → Inline Configurations:
+# Archive) pra dentro do servidor ANTES de rodar esta opção.
+
+install_openvpn_client() {
+    printf '\n%s═══ Instalação do OpenVPN Client (central → DC RAD) ═══%s\n\n' \
+        "${C_BOLD}" "${C_RESET}"
+
+    # ─── 6.0  Pré-checks ───
+    require_cmd systemctl "este script depende de systemd (Issabel/CentOS 7 já tem)"
+
+    # ─── 6.1  Prompts: slug do cliente + path do zip ───
+    local client_slug zip_path
+    while :; do
+        client_slug=$(prompt "Slug do cliente (lowercase + dígitos + hífen, ex: acme)" "")
+        if [[ -z "${client_slug}" ]]; then
+            warn "Slug vazio. Tente de novo (ou Ctrl+C pra cancelar)."
+            continue
+        fi
+        if [[ "${client_slug}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+            break
+        fi
+        warn "Slug inválido: '${client_slug}'. Use só lowercase, dígitos e hífen (ex: acme, acme-rj)."
+    done
+
+    while :; do
+        zip_path=$(prompt "Path do .zip do pfSense (ex: /root/${client_slug}.zip)" "")
+        if [[ -z "${zip_path}" ]]; then
+            warn "Path vazio. Tente de novo."
+            continue
+        fi
+        if [[ ! -f "${zip_path}" ]]; then
+            warn "Arquivo não encontrado: ${zip_path}"
+            continue
+        fi
+        # Sanity de conteúdo: vai falhar igual no template, mas é melhor avisar aqui
+        if command -v file >/dev/null 2>&1 && ! file -b "${zip_path}" 2>/dev/null | grep -qi 'zip archive'; then
+            warn "${zip_path} não parece um ZIP válido. Exporte do pfSense como 'Inline Configurations: Archive'."
+            if ! confirm "Continuar mesmo assim?"; then continue; fi
+        fi
+        break
+    done
+
+    # ─── 6.2  Mostra o que vai acontecer + confirmação ───
+    cat <<EOF
+${C_BOLD}O que será aplicado${C_RESET}
+────────────────────
+  Cliente            : ${client_slug}
+  Username VPN       : voip.${client_slug}
+  Senha VPN          : ${C_DIM}(padrão do grupo — vem do template privado)${C_RESET}
+  Zip do pfSense     : ${zip_path}
+  Diretório destino  : /etc/openvpn/client/
+  Arquivo .conf      : /etc/openvpn/client/${client_slug}.conf
+  Unit systemd       : openvpn-client@${client_slug}.service
+  Template do grupo  : ${C_DIM}${SOURCE_REPO_OWNER_DEFAULT}/${SOURCE_REPO_NAME_DEFAULT}@${SOURCE_REPO_BRANCH}:${OPENVPN_REPO_PATH}${C_RESET}
+
+O template vai: instalar openvpn+unzip (via yum/dnf), extrair o zip, criar
+o arquivo auth com user+senha, renomear o .ovpn → ${client_slug}.conf, ajustar
+'auth-user-pass auth', remover linhas data-ciphers, e subir a unit. Após 5s,
+valida que a unit ficou ativa e que existe IP na interface tun.
+
+EOF
+    if ! confirm "Baixar o template e aplicar agora?"; then
+        info "Cancelado. Voltando ao menu."
+        sleep 1
+        show_menu
+        return
+    fi
+
+    # ─── 6.3  Token + download do template ───
+    local token script_path
+    token=$(get_github_token "${SOURCE_REPO_OWNER_DEFAULT}" "${SOURCE_REPO_NAME_DEFAULT}" \
+        "o template padrão do OpenVPN Client")
+
+    script_path=$(mktemp /tmp/openvpn-setup.XXXXXX.sh)
+    trap 'rm -f "${script_path}"' EXIT
+    chmod 700 "${script_path}"
+
+    github_download_file "${token}" "${SOURCE_REPO_OWNER_DEFAULT}" \
+        "${SOURCE_REPO_NAME_DEFAULT}" "${SOURCE_REPO_BRANCH}" \
+        "${OPENVPN_REPO_PATH}" "${script_path}"
+    token=""  # zera da memória
+
+    if ! head -1 "${script_path}" | grep -q '^#!.*bash'; then
+        rm -f "${script_path}"
+        die "Arquivo baixado não parece um shell script (falta shebang). Verifique se ${OPENVPN_REPO_PATH} existe no branch ${SOURCE_REPO_BRANCH}."
+    fi
+
+    # ─── 6.4  Executa o template com env vars ───
+    info "Executando OpenVPN setup… (logs detalhados abaixo)"
+    printf '%s\n' "${C_DIM}────────────────────────────────────────────────────────────${C_RESET}"
+    local rc=0
+    CLIENT_SLUG="${client_slug}" ZIP_PATH="${zip_path}" \
+        bash "${script_path}" || rc=$?
+    printf '%s\n' "${C_DIM}────────────────────────────────────────────────────────────${C_RESET}"
+
+    rm -f "${script_path}"; trap - EXIT
+
+    if [[ ${rc} -ne 0 ]]; then
+        err "OpenVPN setup falhou (exit ${rc}). Veja o output acima e os logs da unit."
+        info "Comandos úteis pra investigar:"
+        printf '  journalctl -u openvpn-client@%s.service -n 50\n' "${client_slug}"
+        printf '  systemctl status openvpn-client@%s.service\n' "${client_slug}"
+        _log_to_file "INSTALL OPENVPN-CLIENT FAILED (slug=${client_slug}, exit ${rc})"
+        read -r -p "Pressione Enter pra voltar ao menu…" _ </dev/tty
+        show_menu
+        return
+    fi
+
+    _log_to_file "INSTALL OPENVPN-CLIENT OK (slug=${client_slug})"
+    ok "OpenVPN client conectado à VPN do DC RAD."
     ok "Pronto! Volte ao menu (Enter) ou Ctrl+C pra sair."
     read -r </dev/tty || true
     show_menu

@@ -2,6 +2,23 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] — 2026-05-30
+
+### Adicionado (nova opção 6 — OpenVPN Client via repo privado)
+
+- **Nova opção 6 no menu: "Instalar OpenVPN Client (conexão da central ao DC RAD)"** (`install_openvpn_client`). Instala o cliente OpenVPN no servidor Issabel e conecta-o à VPN do datacenter de controle da RAD (onde vive a Platform). Mesmo modelo da opção 4: o script de setup vive no monorepo PRIVADO `rdebruem/rad-ecosystem` em `apps/rad-pbx-platform/scripts/openvpn-client/setup-default.sh` porque contém a senha padrão compartilhada do grupo RAD.
+  - **Prompts no menu**: slug do cliente (lowercase + dígitos + hífen, validado por regex) e path absoluto do `.zip` exportado do pfSense (validado: existe + `file` reconhece como ZIP). O admin tem que ter feito scp do zip pro servidor ANTES.
+  - **Inputs passados ao template** via env vars (`CLIENT_SLUG`, `ZIP_PATH`) — sem hardcode no instalador público.
+  - **O template do grupo** (privado) faz: instala `openvpn` + `unzip` (yum/dnf + EPEL); para a unit se já rodava (idempotente); extrai com `unzip -j` em `/etc/openvpn/client/` (achata estrutura — certs relativos no `.ovpn` resolvem); cria `/etc/openvpn/client/auth` com `voip.${CLIENT_SLUG}` na L1 e a senha do grupo na L2 (perms 600 root:root antes do conteúdo entrar); renomeia `*.ovpn` → `${CLIENT_SLUG}.conf` (bate com nome da unit); edita o `.conf` (`auth-user-pass auth` + remove linhas `data-ciphers` por incompatibilidade com cipher legado do servidor OpenVPN do DC); `systemctl enable + start openvpn-client@${CLIENT_SLUG}.service`; aguarda 5s e valida `is-active` + IP de interface `tun*`. Se falhou, despeja `journalctl -n 30` e sai com erro.
+  - **Sanity check pós-download** + **token zerado em memória** + **trap rm** garantem cleanup, igual à opção 4.
+- **`SCRIPT_VERSION` 0.13.0 → 0.14.0.**
+
+### Segurança
+
+- **Continua sem credenciais no repo público.** A senha VPN padrão do grupo só existe no template privado em `rad-ecosystem`. O instalador conhece apenas o **path** (`OPENVPN_REPO_PATH`).
+
+> Sem migração necessária. Quem rodou 0.13.0 pode pular pra 0.14.0 direto — só adiciona uma nova opção, não muda comportamento das opções 1-5.
+
 ## [0.13.0] — 2026-05-30
 
 ### Adicionado (nova opção 4 — RAD Connector via repo privado)
