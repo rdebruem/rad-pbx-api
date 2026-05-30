@@ -2,6 +2,49 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.15.0] — 2026-05-30
+
+### Mudado (opção 6 — modelo "template compartilhado" do OpenVPN Client, sem zip)
+
+- **A opção 6 não pede mais o `.zip` do pfSense.** Análise de cert real (`openssl pkcs12 -info`): o `.ovpn` exportado pelo pfSense usa `auth-user-pass` + `verify-x509-name "RAD TECH"` — o cliente verifica o **servidor**, não o contrário. O servidor OpenVPN do DC RAD não valida CN do cliente, então o `.p12` (CA + cert + key) e o `-tls.key` podem ser **compartilhados** entre todas as centrais do grupo.
+- **Novo modelo de artefatos** em `rdebruem/rad-ecosystem` em `apps/rad-pbx-platform/scripts/openvpn-client/template/`:
+  - `rad-dc.p12` (binário, cert PKCS#12 sem senha; servidor OpenVPN do DC RAD ignora CN do cliente)
+  - `rad-dc-tls.key` (TLS auth key estática do servidor)
+  - `client.conf` (template do .conf com refs genéricas ao .p12/.key e remote do DC fixo)
+- **A opção 6 agora pergunta SÓ o slug do cliente**, baixa os 4 arquivos (orquestrador + 3 do template) via Contents API com `Accept: application/vnd.github.raw` (suporta binários até ~1MB), valida tamanho não-zero dos artefatos sensíveis, e executa o orquestrador passando `CLIENT_SLUG` + `TEMPLATE_DIR` por env. Sem unzip, sem regex pra editar `data-ciphers` (o template já vem limpo).
+- **`setup-default.sh` no monorepo privado foi simplificado de 8 → 6 passos**: install openvpn → stop unit → copy template → create auth → enable+start → validate.
+- **Operação no pfSense ao cadastrar cliente novo**: criar user `voip.${slug}` com a senha padrão. Sem export, sem download, sem scp.
+- **`SCRIPT_VERSION` 0.14.0 → 0.15.0.**
+
+### Removido
+
+- Prompt pelo path do `.zip` do pfSense na opção 6.
+- Constante `OPENVPN_REPO_PATH` continua existindo (path do orquestrador); nova `OPENVPN_TEMPLATE_DIR_IN_REPO` derivada dela aponta pra `template/`.
+- Pré-requisito de `unzip` na central (não precisa mais).
+
+### Limitação conhecida
+
+- Se algum cliente do grupo RAD for migrado pra um servidor pfSense configurado com **"Username as Common Name = on"**, o servidor passa a exigir cert único por user e o template compartilhado deixa de funcionar (TLS handshake failed). Solução nesse caso: voltar ao fluxo do zip per-cliente (reverter pra 0.14.0) ou desabilitar "Username as Common Name" no pfSense.
+
+> Migração: a 0.15.0 substitui a 0.14.0 — quem usou 0.14.0 não precisa reverter nada (a `auth`, `.conf` e unit já existentes continuam válidos). Rodar de novo na 0.15.0 sobrescreve os artefatos pelos do template compartilhado de forma idempotente.
+
+## [0.14.0] — 2026-05-30
+
+### Adicionado (nova opção 6 — OpenVPN Client via repo privado)
+
+- **Nova opção 6 no menu: "Instalar OpenVPN Client (conexão da central ao DC RAD)"** (`install_openvpn_client`). Instala o cliente OpenVPN no servidor Issabel e conecta-o à VPN do datacenter de controle da RAD (onde vive a Platform). Mesmo modelo da opção 4: o script de setup vive no monorepo PRIVADO `rdebruem/rad-ecosystem` em `apps/rad-pbx-platform/scripts/openvpn-client/setup-default.sh` porque contém a senha padrão compartilhada do grupo RAD.
+  - **Prompts no menu**: slug do cliente (lowercase + dígitos + hífen, validado por regex) e path absoluto do `.zip` exportado do pfSense (validado: existe + `file` reconhece como ZIP). O admin tem que ter feito scp do zip pro servidor ANTES.
+  - **Inputs passados ao template** via env vars (`CLIENT_SLUG`, `ZIP_PATH`) — sem hardcode no instalador público.
+  - **O template do grupo** (privado) faz: instala `openvpn` + `unzip` (yum/dnf + EPEL); para a unit se já rodava (idempotente); extrai com `unzip -j` em `/etc/openvpn/client/` (achata estrutura — certs relativos no `.ovpn` resolvem); cria `/etc/openvpn/client/auth` com `voip.${CLIENT_SLUG}` na L1 e a senha do grupo na L2 (perms 600 root:root antes do conteúdo entrar); renomeia `*.ovpn` → `${CLIENT_SLUG}.conf` (bate com nome da unit); edita o `.conf` (`auth-user-pass auth` + remove linhas `data-ciphers` por incompatibilidade com cipher legado do servidor OpenVPN do DC); `systemctl enable + start openvpn-client@${CLIENT_SLUG}.service`; aguarda 5s e valida `is-active` + IP de interface `tun*`. Se falhou, despeja `journalctl -n 30` e sai com erro.
+  - **Sanity check pós-download** + **token zerado em memória** + **trap rm** garantem cleanup, igual à opção 4.
+- **`SCRIPT_VERSION` 0.13.0 → 0.14.0.**
+
+### Segurança
+
+- **Continua sem credenciais no repo público.** A senha VPN padrão do grupo só existe no template privado em `rad-ecosystem`. O instalador conhece apenas o **path** (`OPENVPN_REPO_PATH`).
+
+> Sem migração necessária. Quem rodou 0.13.0 pode pular pra 0.14.0 direto — só adiciona uma nova opção, não muda comportamento das opções 1-5.
+
 ## [0.13.0] — 2026-05-30
 
 ### Adicionado (nova opção 4 — RAD Connector via repo privado)
