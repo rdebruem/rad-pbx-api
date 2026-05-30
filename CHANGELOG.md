@@ -2,6 +2,31 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.16.0] — 2026-05-30
+
+### Adicionado (nova opção 0 — Configurar central + banner com hostname/IP)
+
+- **Nova opção 0 no menu: "Configurar central (IP + hostname)"** (`configure_central`). Pensada para a primeira instalação de servidor Issabel:
+  - Detecta a interface ativa (a com rota default) e mostra todas as IPv4 disponíveis no host. Permite escolher outra se necessário.
+  - Pergunta IP, máscara (aceita dotted `255.255.255.0` **ou** CIDR `24`), gateway, DNS primário (default `8.8.8.8`), DNS secundário (default `1.1.1.1`) e hostname. Cada prompt valida o input (IPv4 com octetos válidos; hostname RFC 1123 simplificado).
+  - Reescreve `/etc/sysconfig/network-scripts/ifcfg-${iface}` com `BOOTPROTO=static`, preservando UUID/HWADDR existentes. Backup datado em `/var/backups/rad-api/`.
+  - `hostnamectl set-hostname` + atualização conservadora de `/etc/hosts` (substitui o hostname antigo na linha `127.0.0.1` ou adiciona se ausente; backup datado).
+  - Restart de `network.service` (ou `NetworkManager.service` se aplicável) e validação pós-restart: confere se o IP foi aplicado na interface + ping no gateway.
+  - **Aviso explícito de SSH dropout** quando detecta sessão SSH em curso (`$SSH_CONNECTION`) e o IP novo é diferente do atual — sugere reconectar no novo IP.
+- **Banner do menu** agora mostra **hostname atual + IP da interface ativa** logo no topo, antes da frase "Componentes do ecossistema RAD pra rodar no servidor Issabel".
+- **`SCRIPT_VERSION` 0.15.0 → 0.16.0.**
+
+### Helpers internos novos
+
+- `_get_active_interface` — detecta interface via rota default (mais confiável que adivinhar pelo nome `eth0`/`ens33`/`enp0s3`).
+- `_get_current_ip` — IPv4 da interface ativa.
+- `_validate_ipv4` — formato + octetos 0-255.
+- `_validate_hostname` — RFC 1123 simplificado.
+- `_netmask_to_prefix` — converte dotted (`255.255.255.0`) ou CIDR (`24`) pra prefix puro.
+- `_write_ifcfg` — gera ifcfg consistente, preservando UUID/HWADDR se existir.
+
+> Sem migração necessária — opção aditiva. Quem rodou versões anteriores não precisa fazer nada.
+
 ## [0.15.0] — 2026-05-30
 
 ### Mudado (opção 6 — modelo "template compartilhado" do OpenVPN Client, sem zip)
