@@ -2,6 +2,19 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.16.1] — 2026-05-30
+
+### Corrigido (opção 0 — mudanças se perdiam por reboot prematuro)
+
+- **Bug reportado em produção** (Issabel/Hyper-V): rodando a opção 0 via SSH, o servidor mantinha a config antiga após mudança de IP. Diagnóstico: o `_write_ifcfg` escrevia no buffer do kernel, a sessão SSH caía no `systemctl restart network`, o usuário achava que o script tinha travado e rebootava manualmente — o buffer não era flushed em disco e a mudança se perdia. O `ifcfg` no servidor era IDÊNTICO ao backup pré-mudança.
+- **`sync` explícito após cada write em disco** (`_write_ifcfg` e edição de `/etc/hosts`). Garante que as mudanças estão em disco antes de qualquer passo que possa derrubar a sessão SSH.
+- **Restart desacoplado do TTY quando o IP vai mudar**: `nohup setsid bash -c '...' </dev/null >/dev/null 2>&1 & disown`. O processo de restart cria nova sessão (`setsid`), fecha stdin/stdout/stderr herdados do shell, e fica órfão (`disown`) — assim, quando o SSH do usuário cai, o restart continua rodando até o fim. Quando o IP NÃO muda, o restart roda inline com validação normal (`ip addr show` + `ping` no gateway).
+- **`nmcli connection reload` antes do restart** quando `NetworkManager.service` está ativo. Necessário em sistemas Issabel com NM gerenciando a interface (caso comum) pra forçar o NM a re-ler o ifcfg novo.
+- **Aviso visual forte** logo antes do restart, com box amarelo + frase explícita `NÃO REBOOTE o servidor` e o comando `ssh root@<novo-ip>` pra reconectar.
+- **`SCRIPT_VERSION` 0.16.0 → 0.16.1.**
+
+> Se você caiu nesse bug na 0.16.0: o ifcfg antigo ainda está em `/var/backups/rad-api/ifcfg-<iface>.<UTC>` (foi feito o backup mas não a sobrescrita). Rode a opção 0 da 0.16.1 — desta vez, **espere o restart acontecer em background e reconecte no novo IP, sem rebootar**.
+
 ## [0.16.0] — 2026-05-30
 
 ### Adicionado (nova opção 0 — Configurar central + banner com hostname/IP)

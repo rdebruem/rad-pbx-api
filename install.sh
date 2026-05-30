@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.16.0"
+readonly SCRIPT_VERSION="0.16.1"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -1124,14 +1124,18 @@ EOF
         cp -p "${ifcfg}" "${bk}" && ok "Backup do ifcfg: ${bk}"
     fi
 
-    # ─── 0.5  Reescrever ifcfg ───
+    # ─── 0.5  Reescrever ifcfg + SYNC ───
+    # sync explícito: garante que o ifcfg chegou ao disco ANTES de qualquer
+    # passo que possa derrubar a sessão SSH (restart de rede, hostnamectl,
+    # etc). Sem isso, write ainda em buffer + reboot prematuro do usuário =
+    # mudança perdida. Vimos esse caso em produção (v0.16.0).
     _write_ifcfg "${iface}" "${new_ip}" "${new_prefix}" "${new_gw}" "${new_dns1}" "${new_dns2}"
-    ok "ifcfg reescrito: ${ifcfg}"
+    sync
+    ok "ifcfg reescrito + sincronizado em disco: ${ifcfg}"
 
     # ─── 0.6  Hostname (persistente + /etc/hosts) ───
     local old_hostname; old_hostname=$(hostname)
     if [[ "${new_hostname}" != "${old_hostname}" ]]; then
-        # Backup do /etc/hosts antes de mexer
         if [[ -f /etc/hosts ]]; then
             ensure_backup_dir
             local hbk; hbk=$(backup_path_for "hosts")
@@ -1140,9 +1144,8 @@ EOF
 
         hostnamectl set-hostname "${new_hostname}" || warn "hostnamectl falhou (continuando)."
 
-        # Atualizar /etc/hosts: substitui ocorrências do hostname antigo
-        # na linha 127.0.0.1 / ::1, ou adiciona se ausente. Conservador —
-        # não mexe em outras linhas.
+        # Atualizar /etc/hosts conservadoramente: substitui hostname antigo
+        # na linha 127.0.0.1, ou adiciona se ausente. Não mexe em outras linhas.
         if [[ -f /etc/hosts ]]; then
             if grep -qE "^[[:space:]]*127\.0\.0\.1.*\\b${old_hostname}\\b" /etc/hosts; then
                 sed -i "s/\\b${old_hostname}\\b/${new_hostname}/g" /etc/hosts
@@ -1150,22 +1153,77 @@ EOF
                 printf '127.0.0.1 %s\n' "${new_hostname}" >> /etc/hosts
             fi
         fi
-        ok "Hostname: ${old_hostname} → ${new_hostname}"
+        sync  # idem: garante /etc/hostname + /etc/hosts em disco
+        ok "Hostname: ${old_hostname} → ${new_hostname} (sincronizado em disco)"
     else
         info "Hostname inalterado."
     fi
 
-    # ─── 0.7  Reiniciar rede ───
-    info "Reiniciando rede... (se SSH cair, reconecte em ${new_ip})"
+    # ─── 0.7  Restart de rede ───
+    # Estratégia depende se o IP vai mudar:
+    #  - IP igual: restart inline, valida normalmente (SSH não cai).
+    #  - IP novo:  restart DESACOPLADO do TTY (nohup setsid), pra sobreviver
+    #              à queda da sessão SSH. Aviso visual forte. Script sai.
+    local ip_will_change=0
+    [[ "${new_ip}" != "${current_ip}" ]] && ip_will_change=1
+
+    if [[ "${ip_will_change}" -eq 1 ]]; then
+        cat <<EOF
+
+${C_BOLD}${C_YELLOW}╔══════════════════════════════════════════════════════════╗${C_RESET}
+${C_BOLD}${C_YELLOW}║  ATENÇÃO — Restart da rede em 3s                         ║${C_RESET}
+${C_BOLD}${C_YELLOW}║                                                          ║${C_RESET}
+${C_BOLD}${C_YELLOW}║  Sua sessão SSH vai cair (esperado).                     ║${C_RESET}
+${C_BOLD}${C_YELLOW}║  Aguarde 15-30s e reconecte em:${C_RESET}
+${C_BOLD}${C_YELLOW}║      ${C_BOLD}ssh root@${new_ip}${C_RESET}
+${C_BOLD}${C_YELLOW}║                                                          ║${C_RESET}
+${C_BOLD}${C_YELLOW}║  ${C_RED}NÃO REBOOTE o servidor.${C_RESET}${C_BOLD}${C_YELLOW}                                ║${C_RESET}
+${C_BOLD}${C_YELLOW}║  As mudanças já estão salvas em disco e o restart        ║${C_RESET}
+${C_BOLD}${C_YELLOW}║  vai rodar em background, independente do seu SSH.       ║${C_RESET}
+${C_BOLD}${C_YELLOW}╚══════════════════════════════════════════════════════════╝${C_RESET}
+
+EOF
+        sleep 3
+
+        _log_to_file "CONFIGURE CENTRAL: dispatching detached network restart (iface=${iface} new_ip=${new_ip})"
+        info "Disparando restart desacoplado..."
+
+        # nohup setsid → cria nova sessão de processo, sem TTY de pai.
+        # Quando o SSH do usuário cair, este processo continua rodando.
+        # Reload no nmcli ANTES do restart pra forçar NM a re-ler o ifcfg
+        # (alguns sistemas Issabel com NM ativo precisam disso pra aplicar).
+        nohup setsid bash -c '
+            sleep 1
+            if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+                nmcli connection reload 2>/dev/null || true
+            fi
+            if systemctl list-unit-files 2>/dev/null | grep -q "^network\.service"; then
+                systemctl restart network
+            elif systemctl list-unit-files 2>/dev/null | grep -q "^NetworkManager\.service"; then
+                systemctl restart NetworkManager
+            fi
+        ' </dev/null >/dev/null 2>&1 &
+        disown $! 2>/dev/null || true
+
+        info "Restart agendado em background. Aguarde 30s antes de reconectar."
+        info "Pra confirmar depois: ssh root@${new_ip} 'hostname; ip -4 addr show; ip route show'"
+        _log_to_file "CONFIGURE CENTRAL OK (iface=${iface} ip=${new_ip}/${new_prefix} gw=${new_gw} dns=${new_dns1},${new_dns2} hostname=${new_hostname}; restart detached)"
+        # Sai do script — não retorna pro menu (SSH vai cair de qualquer jeito).
+        exit 0
+    fi
+
+    # IP inalterado → restart inline + validação.
+    info "IP inalterado; aplicando mudanças (DNS/hostname) sem desacoplar..."
+    if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+        nmcli connection reload 2>&1 | sed 's/^/  /' || true
+    fi
     if systemctl list-unit-files 2>/dev/null | grep -q '^network\.service'; then
         systemctl restart network 2>&1 | sed 's/^/  /' || warn "systemctl restart network falhou."
     elif systemctl list-unit-files 2>/dev/null | grep -q '^NetworkManager\.service'; then
         systemctl restart NetworkManager 2>&1 | sed 's/^/  /' || warn "NetworkManager restart falhou."
-    else
-        warn "Nenhum serviço de rede conhecido (network/NetworkManager). Reinicie manualmente."
     fi
 
-    # ─── 0.8  Validar ───
+    # ─── 0.8  Validar (só faz sentido quando IP não muda) ───
     sleep 3
     local applied_ip
     applied_ip=$(ip -4 -o addr show "${iface}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
@@ -1185,7 +1243,7 @@ EOF
 
     info "Hostname atual: $(hostname)"
 
-    _log_to_file "CONFIGURE CENTRAL OK (iface=${iface} ip=${new_ip}/${new_prefix} gw=${new_gw} dns=${new_dns1},${new_dns2} hostname=${new_hostname})"
+    _log_to_file "CONFIGURE CENTRAL OK (iface=${iface} ip=${new_ip}/${new_prefix} gw=${new_gw} dns=${new_dns1},${new_dns2} hostname=${new_hostname}; inline)"
     ok "Pronto! Volte ao menu (Enter) ou Ctrl+C pra sair."
     read -r </dev/tty || true
     show_menu
