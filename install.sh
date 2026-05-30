@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.12.0"
+readonly SCRIPT_VERSION="0.13.0"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -115,7 +115,21 @@ readonly AMI_READ_PERMS="system,call,user,reporting"
 # então a superfície de risco continua nula em deployments típicos.
 readonly AMI_WRITE_PERMS="command,system,call"
 
-# ── RAD-PROTOCOLO (opção 4) — ADR-0112 (central autônoma) ───────────────
+# ── RAD-CONNECTOR (opção 4) — preparo da central pra Platform ──────────
+# Provisiona os usuários técnicos que o backend do RAD PBX Platform usa pra
+# falar com a central (SSH, AMI, MariaDB, ECCP). O script de preparo é o
+# template padrão do grupo RAD — vive no monorepo PRIVADO `rdebruem/rad-
+# ecosystem` em `apps/rad-pbx-platform/scripts/rad-connector/setup-default
+# .sh` porque contém credenciais compartilhadas (usuários técnicos + senha
+# do grupo) que NÃO podem ficar neste repo público. Baixamos via GitHub PAT,
+# mesma UX das opções 1 e 5.
+#
+# Para um script com usuários/senha customizados (e BACKEND_IP restrito),
+# o admin gera via UI da Platform (Central de Ajuda → RAD Connector) e roda
+# o que sai de lá — fora deste fluxo.
+readonly CONNECTOR_REPO_PATH="apps/rad-pbx-platform/scripts/rad-connector/setup-default.sh"
+
+# ── RAD-PROTOCOLO (opção 5) — ADR-0112 (central autônoma) ───────────────
 # Número de protocolo de chamada. A central é INDEPENDENTE da Platform em
 # runtime: o AGI lê o padrão de um arquivo LOCAL (/etc/rad-pbx/protocol-pattern
 # .json, escrito pela Platform via SSH), materializa o valor e grava no
@@ -820,7 +834,11 @@ ${C_BOLD}Menu principal${C_RESET}
        └─ baixa o tema do repo privado ${THEME_REPO_OWNER}/${THEME_REPO_NAME} e
           substitui ${THEME_INSTALL_DIR}/ + ${MOTD_INSTALL_PATH}.
 
-  ${C_BOLD}4${C_RESET})  Instalar RAD-PROTOCOLO (número de protocolo — ADR-0112)
+  ${C_BOLD}4${C_RESET})  Instalar RAD Connector (preparo da central pra Platform)
+       └─ baixa do ${SOURCE_REPO_OWNER_DEFAULT}/${SOURCE_REPO_NAME_DEFAULT} (privado) o template padrão do grupo
+          e provisiona os usuários técnicos SSH/AMI/DB/ECCP na central.
+
+  ${C_BOLD}5${C_RESET})  Instalar RAD-PROTOCOLO (número de protocolo — ADR-0112)
        └─ central autônoma: AGI + stub de dialplan + padrão local. Sem rede,
           sem sync. NÃO altera roteamento (inerte até a rota fazer Gosub).
 
@@ -833,7 +851,8 @@ EOF
         1)  install_contacts_api ;;
         2)  install_ptbr_audios ;;
         3)  install_rad_pbx_theme ;;
-        4)  install_rad_protocolo ;;
+        4)  install_rad_connector ;;
+        5)  install_rad_protocolo ;;
         q|Q) info "Saindo."; exit 0 ;;
         "") warn "Input vazio (provavelmente stdin do bash não está atrelado ao terminal — curl|sudo bash em alguns sudos). Use: wget https://raw.githubusercontent.com/rdebruem/rad-pbx-api/main/install.sh && chmod +x install.sh && sudo ./install.sh"; exit 1 ;;
         *)  warn "Opção inválida: '${choice}'"; sleep 1; show_menu ;;
@@ -1484,7 +1503,106 @@ EOF
 }
 
 # ════════════════════════════════════════════════════════════════════════
-#  Opção 4 — Instalar RAD-PROTOCOLO (ADR-0110)
+#  Opção 4 — Instalar RAD Connector (preparo da central pra Platform)
+# ════════════════════════════════════════════════════════════════════════
+#
+# Baixa o template padrão do grupo RAD (`setup-default.sh`) do monorepo
+# privado e executa na central. O template contém credenciais técnicas
+# compartilhadas (usuários `rad`/`radami`/`radcdr`/`radeccp` + senha do
+# grupo, BACKEND_IP=0.0.0.0) — por isso fica em repo privado e não pode
+# ser embutido neste instalador (que é público).
+#
+# Para script customizado (com usuários/senha/IP diferentes), o admin gera
+# pela UI da Platform → Central de Ajuda → RAD Connector e roda o que sai
+# de lá fora deste fluxo.
+
+install_rad_connector() {
+    printf '\n%s═══ Instalação do RAD Connector (preparo da central) ═══%s\n\n' \
+        "${C_BOLD}" "${C_RESET}"
+
+    # ─── 4.0  Pré-checks ───
+    if ! id asterisk >/dev/null 2>&1; then
+        die "Usuário 'asterisk' não existe — esperado em servidor Issabel/Asterisk."
+    fi
+    if [[ ! -f /etc/asterisk/manager.conf ]]; then
+        die "/etc/asterisk/manager.conf não encontrado — Asterisk/Issabel não está instalado?"
+    fi
+    require_cmd mysql "yum install -y mariadb (ou ajuste o cliente MariaDB do servidor)"
+
+    # ─── 4.1  Aviso de segurança + confirmação ───
+    cat <<EOF
+${C_BOLD}O que será aplicado${C_RESET}
+────────────────────
+O template padrão do grupo RAD cria 4 usuários técnicos na central (SSH,
+AMI, MariaDB, ECCP) com credenciais compartilhadas, libera bind 0.0.0.0
+no MariaDB e autoriza o cliente ECCP. Os valores exatos (usuários, senha,
+permits) vêm do template privado em:
+
+  ${C_DIM}${SOURCE_REPO_OWNER_DEFAULT}/${SOURCE_REPO_NAME_DEFAULT}@${SOURCE_REPO_BRANCH}:${CONNECTOR_REPO_PATH}${C_RESET}
+
+${C_YELLOW}⚠${C_RESET}  O template padrão usa BACKEND_IP=0.0.0.0 — libera AMI (5038) e MariaDB
+   (3306) pra qualquer origem. Use apenas em redes confiáveis ou atrás
+   de outro firewall. Pra restringir, regere via UI da Platform (Central
+   de Ajuda → RAD Connector) e rode o script de lá.
+
+EOF
+    if ! confirm "Baixar e aplicar o template padrão agora?"; then
+        info "Cancelado. Voltando ao menu."
+        sleep 1
+        show_menu
+        return
+    fi
+
+    # ─── 4.2  Token GitHub (mesma UX das opções 1 e 5) ───
+    local token
+    token=$(get_github_token "${SOURCE_REPO_OWNER_DEFAULT}" "${SOURCE_REPO_NAME_DEFAULT}" \
+        "o template padrão do RAD Connector")
+
+    # ─── 4.3  Download pra /tmp ───
+    local script_path
+    script_path=$(mktemp /tmp/rad-connector-setup.XXXXXX.sh)
+    trap 'rm -f "${script_path}"' EXIT
+    chmod 700 "${script_path}"
+
+    github_download_file "${token}" "${SOURCE_REPO_OWNER_DEFAULT}" \
+        "${SOURCE_REPO_NAME_DEFAULT}" "${SOURCE_REPO_BRANCH}" \
+        "${CONNECTOR_REPO_PATH}" "${script_path}"
+    token=""  # não é mais necessário — zera da memória do shell
+
+    # Sanity-check: o arquivo baixado é um shell script?
+    if ! head -1 "${script_path}" | grep -q '^#!.*bash'; then
+        rm -f "${script_path}"
+        die "Arquivo baixado não parece um shell script (falta shebang). Verifique se ${CONNECTOR_REPO_PATH} existe no branch ${SOURCE_REPO_BRANCH}."
+    fi
+
+    # ─── 4.4  Executa o script baixado ───
+
+    info "Executando RAD Connector setup… (logs detalhados abaixo)"
+    printf '%s\n' "${C_DIM}────────────────────────────────────────────────────────────${C_RESET}"
+    local rc=0
+    bash "${script_path}" || rc=$?
+    printf '%s\n' "${C_DIM}────────────────────────────────────────────────────────────${C_RESET}"
+
+    rm -f "${script_path}"; trap - EXIT
+
+    if [[ ${rc} -ne 0 ]]; then
+        err "RAD Connector falhou (exit ${rc}). Inspecione a saída acima."
+        _log_to_file "INSTALL RAD CONNECTOR FAILED (exit ${rc})"
+        read -r -p "Pressione Enter pra voltar ao menu…" _ </dev/tty
+        show_menu
+        return
+    fi
+
+    _log_to_file "INSTALL RAD CONNECTOR OK"
+    ok "RAD Connector aplicado com sucesso."
+    info "Use os mesmos usuários/senha em Conexões → Nova conexão no RAD PBX Platform."
+    ok "Pronto! Volte ao menu (Enter) ou Ctrl+C pra sair."
+    read -r </dev/tty || true
+    show_menu
+}
+
+# ════════════════════════════════════════════════════════════════════════
+#  Opção 5 — Instalar RAD-PROTOCOLO (ADR-0112)
 # ════════════════════════════════════════════════════════════════════════
 
 # Instala um arquivo baixado: backup do destino se já existir, depois copia
@@ -1556,7 +1674,7 @@ EOF
         return
     fi
     if ! id "${ssh_user}" >/dev/null 2>&1; then
-        warn "Usuário '${ssh_user}' não existe no host. Pulei o sudoers — crie o usuário e rode a opção 4 de novo, ou ajuste ${PROTO_SUDOERS_FILE} manualmente."
+        warn "Usuário '${ssh_user}' não existe no host. Pulei o sudoers — crie o usuário e rode a opção 5 de novo, ou ajuste ${PROTO_SUDOERS_FILE} manualmente."
         return
     fi
 
@@ -1668,7 +1786,7 @@ _pkg_install() {
     esac
 }
 
-# Garante as dependências da opção 4 (ADR-0112). Tenta INSTALAR o que faltar
+# Garante as dependências da opção 5 (ADR-0112). Tenta INSTALAR o que faltar
 # em vez de só abortar — python3 (3.6+) cobre AGI/core/setter; json/secrets vêm
 # no python3-libs. Idempotente: nada a fazer se já presentes. Roda como root
 # (o instalador é invocado via sudo), então o yum/dnf/apt funciona.
@@ -1707,18 +1825,18 @@ _proto_ensure_deps() {
 install_rad_protocolo() {
     printf '\n%s═══ Instalação do RAD-PROTOCOLO (ADR-0112 — central autônoma) ═══%s\n\n' "${C_BOLD}" "${C_RESET}"
 
-    # ─── 4.0  Pré-requisitos específicos (instala o que faltar) ───
+    # ─── 5.0  Pré-requisitos específicos (instala o que faltar) ───
     _proto_ensure_deps
     if ! id asterisk >/dev/null 2>&1; then
         die "Usuário 'asterisk' não existe — esperado em servidor Issabel/Asterisk."
     fi
 
-    # ─── 4.1  Token GitHub (mesma UX das opções 1 e 3) ───
+    # ─── 5.1  Token GitHub (mesma UX das opções 1 e 3) ───
     local token
     token=$(get_github_token "${SOURCE_REPO_OWNER_DEFAULT}" "${SOURCE_REPO_NAME_DEFAULT}" \
         "os scripts do RAD-PROTOCOLO (ADR-0112)")
 
-    # ─── 4.2  Download dos artefatos pra um tmp ───
+    # ─── 5.2  Download dos artefatos pra um tmp ───
     local tmp; tmp=$(mktemp -d)
     trap 'rm -rf "${tmp}"' EXIT
     local entry repo_path dest owner mode tag
@@ -1730,23 +1848,23 @@ install_rad_protocolo() {
     done
     token=""  # não é mais necessário
 
-    # ─── 4.3  Diretório de config/padrão (idempotente) ───
+    # ─── 5.3  Diretório de config/padrão (idempotente) ───
     mkdir -p "${PROTO_CONFIG_DIR}" && chown root:asterisk "${PROTO_CONFIG_DIR}" && chmod 750 "${PROTO_CONFIG_DIR}"
     ok "Diretório pronto: ${PROTO_CONFIG_DIR}  (750 root:asterisk)"
 
-    # ─── 4.4  Instala os arquivos (backup do anterior se houver) ───
+    # ─── 5.4  Instala os arquivos (backup do anterior se houver) ───
     for entry in "${PROTO_FILES[@]}"; do
         IFS='|' read -r repo_path dest owner mode tag <<< "${entry}"
         _proto_install_file "${tmp}/$(basename "${dest}")" "${dest}" "${owner}" "${mode}" "${tag}"
     done
 
-    # ─── 4.5  Padrão default local (Platform sobrescreve por SSH depois) ───
+    # ─── 5.5  Padrão default local (Platform sobrescreve por SSH depois) ───
     _proto_seed_pattern
 
-    # ─── 4.6  sudoers do setter (push do padrão pela Platform) ───
+    # ─── 5.6  sudoers do setter (push do padrão pela Platform) ───
     _proto_setup_sudoers
 
-    # ─── 4.7  #include extensions_rad.conf (idempotente, com backup) ───
+    # ─── 5.7  #include extensions_rad.conf (idempotente, com backup) ───
     if grep -qxF "#include ${PROTO_DIALPLAN_INCLUDE}" "${PROTO_EXTENSIONS_CONF}" 2>/dev/null; then
         ok "#include ${PROTO_DIALPLAN_INCLUDE} já presente em ${PROTO_EXTENSIONS_CONF}."
     else
@@ -1762,10 +1880,10 @@ install_rad_protocolo() {
         ok "#include ${PROTO_DIALPLAN_INCLUDE} adicionado a ${PROTO_EXTENSIONS_CONF}."
     fi
 
-    # ─── 4.8  Smoke test ───
+    # ─── 5.8  Smoke test ───
     _proto_smoke_test
 
-    # ─── 4.9  Instruções de wiring (manual — não tocamos em roteamento) ───
+    # ─── 5.9  Instruções de wiring (manual — não tocamos em roteamento) ───
     _proto_print_wiring
 
     rm -rf "${tmp}"; trap - EXIT
