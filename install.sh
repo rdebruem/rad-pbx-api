@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.16.2"
+readonly SCRIPT_VERSION="0.16.3"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -785,9 +785,16 @@ EOF
         fi
         any_active=1
         printf '\n%s%s%s status atual:\n' "${C_BOLD}" "${daemon}" "${C_RESET}"
+        # `|| true` necessário: o script roda com `set -euo pipefail`, e
+        # `systemctl status` retorna exit 3 quando o serviço está em estado
+        # "exited" (caso comum em SYSV/LSB legacy do Issabel — ex:
+        # `issabeldialer` que faz fork/exit e fica como "active (exited)").
+        # Sem `|| true`, o pipefail propaga o 3 e o set -e mata o script
+        # silenciosamente antes de chegar no confirm — reportado em prod
+        # em 2026-05-30 com o issabeldialer.
         systemctl status --no-pager -n 3 "${daemon}.service" 2>/dev/null \
             | head -5 \
-            | sed 's/^/  /'
+            | sed 's/^/  /' || true
         printf '\n'
         if confirm "Reiniciar ${daemon}?"; then
             if systemctl restart "${daemon}.service" 2>/dev/null; then
