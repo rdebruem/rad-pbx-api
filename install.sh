@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.16.3"
+readonly SCRIPT_VERSION="0.16.4"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -647,7 +647,12 @@ manager_add_user() {
             "${SCRIPT_NAME}" "${SCRIPT_VERSION}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         printf '[%s]\n' "${user}"
         printf 'secret = %s\n' "${secret}"
-        printf 'deny = 0.0.0.0/0\n'
+        # IMPORTANTE: usar formato DOTTED (0.0.0.0/0.0.0.0), NÃO CIDR (/0).
+        # O parser ACL do Asterisk 11 (Issabel 4) rejeita o /0 e desabilita
+        # o módulo manager INTEIRO (Manager (AMI): No, socket 5038 fechado).
+        # Reportado em produção em 2026-05-31 — mesmo formato usado pelos
+        # outros usuários AMI do Issabel (phpconfig, phpagi, etc).
+        printf 'deny = 0.0.0.0/0.0.0.0\n'
         printf 'permit = 127.0.0.1/255.255.255.255\n'
         printf 'read = %s\n' "${AMI_READ_PERMS}"
         printf 'write = %s\n' "${AMI_WRITE_PERMS}"

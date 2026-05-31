@@ -2,6 +2,17 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.16.4] — 2026-05-31
+
+### Corrigido (opção 1 — `deny = 0.0.0.0/0` quebrava o módulo manager do Asterisk)
+
+- **Bug reportado em produção**: após rodar opção 1 num servidor Issabel zerado, o módulo AMI **inteiro** ficava desabilitado (`Manager (AMI): No` em `manager show settings`, socket 5038 fechado). O cliente RAD Softphone deixava de receber presence dos ramais (todos apareciam como offline).
+- **Root cause**: a linha `printf 'deny = 0.0.0.0/0\n'` (linha 650) gerava formato CIDR (`/0`) que **não é aceito** pelo parser ACL do Asterisk 11 do Issabel. O parser rejeita o bloco inteiro e, dependendo do estado da config, desabilita o módulo manager por defesa. Mesma classe de bug do RAD Connector setup-default.sh corrigido em rad-ecosystem#19 — a v0.16.3 do install.sh aqui ainda tinha o vestígio antigo.
+- **Fix**: troca `deny = 0.0.0.0/0` → `deny = 0.0.0.0/0.0.0.0` (formato dotted, igual aos outros usuários AMI default do Issabel: `phpconfig`, `phpagi`, etc).
+- **`SCRIPT_VERSION` 0.16.3 → 0.16.4.**
+
+> Para centrais já afetadas pela 0.16.3 ou anterior: editar manualmente `/etc/asterisk/manager_custom.conf`, corrigir o `deny = 0.0.0.0/0` → `deny = 0.0.0.0/0.0.0.0` na seção `[rad-localhost]`, e rodar `asterisk -rx "manager reload"`. Ou re-rodar opção 1 da 0.16.4 (idempotente — substitui o bloco).
+
 ## [0.16.3] — 2026-05-31
 
 ### Corrigido (opção 1 — `restart_ami_consumers` saía silenciosamente em serviço "exited")
