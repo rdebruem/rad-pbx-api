@@ -2,6 +2,15 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.16.3] — 2026-05-31
+
+### Corrigido (opção 1 — `restart_ami_consumers` saía silenciosamente em serviço "exited")
+
+- **Bug reportado em produção**: rodando opção 1 (instalar API de contatos) no servidor Issabel zerado, o script encerrava silenciosamente logo após mostrar o status do `issabeldialer`, sem chegar a perguntar se queria restartar o daemon. O usuário voltava ao prompt sem mensagem de erro.
+- **Root cause**: `systemctl status` retorna **exit code 3** quando o serviço está em estado `"active (exited)"` (caso de SYSV/LSB legacy do Issabel — `issabeldialer` faz fork/exit e o systemd marca como exited). Com `set -euo pipefail` (em vigor desde o início), o `pipefail` propagava o 3 do `systemctl` pro pipe `| head -5 | sed`, e o `set -e` matava o script.
+- **Fix**: `|| true` no fim do pipe `systemctl status ... | head -5 | sed ...`. Mesmo padrão de fix aplicado na 0.16.2 (`_write_ifcfg` com `grep | head | cut | tr`).
+- **`SCRIPT_VERSION` 0.16.2 → 0.16.3.**
+
 ## [0.16.2] — 2026-05-30
 
 ### Corrigido (opção 0 — `set -e` + `pipefail` matavam o script no `_write_ifcfg`)
