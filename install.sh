@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.16.5"
+readonly SCRIPT_VERSION="0.16.6"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -156,14 +156,23 @@ readonly PROTO_FILES=(
   "${PROTO_REPO_DIR}/asterisk-agi/rad_protocolo_core.py|/var/lib/asterisk/agi-bin/rad_protocolo_core.py|asterisk:asterisk|644|rad_protocolo_core.py"
   "${PROTO_REPO_DIR}/asterisk-agi/extensions_rad.conf|/etc/asterisk/extensions_rad.conf|asterisk:asterisk|644|extensions_rad.conf"
   "${PROTO_REPO_DIR}/asterisk-agi/rad-pbx-set-pattern|/usr/local/sbin/rad-pbx-set-pattern|root:root|755|rad-pbx-set-pattern"
+  "${PROTO_REPO_DIR}/asterisk-agi/rad-pbx-set-wrapper|/usr/local/sbin/rad-pbx-set-wrapper|root:root|755|rad-pbx-set-wrapper"
 )
 readonly PROTO_CONFIG_DIR="/etc/rad-pbx"
 readonly PROTO_PATTERN_PATH="${PROTO_CONFIG_DIR}/protocol-pattern.json"
 readonly PROTO_DEFAULT_TEMPLATE="PROT-{YYYY}-{ULID}"
 readonly PROTO_AGI_PATH="/var/lib/asterisk/agi-bin/rad-protocolo.agi"
 readonly PROTO_SETTER_PATH="/usr/local/sbin/rad-pbx-set-pattern"
+# Setter dos wrappers de roteamento (ADR-0126). A Platform o invoca via sudo
+# pelo mesmo usuário SSH; materializa os contextos [rad-protocolo-wrap-<slug>].
+readonly PROTO_WRAP_SETTER_PATH="/usr/local/sbin/rad-pbx-set-wrapper"
 readonly PROTO_SUDOERS_FILE="/etc/sudoers.d/rad-pbx-protocol"
 readonly PROTO_DIALPLAN_INCLUDE="extensions_rad.conf"
+# Arquivo de wrappers — GERADO pelo setter (não baixado). O instalador só
+# garante o #include e semeia um arquivo vazio pra o include não quebrar antes
+# do 1º push (ADR-0126).
+readonly PROTO_WRAP_DIALPLAN_INCLUDE="extensions_rad_wrap.conf"
+readonly PROTO_WRAP_CONF_PATH="/etc/asterisk/extensions_rad_wrap.conf"
 readonly PROTO_EXTENSIONS_CONF="/etc/asterisk/extensions.conf"
 
 # Log centralizado — todo output do script é também tee'd pra cá.
@@ -2128,9 +2137,10 @@ EOF
 
     local tmp; tmp=$(mktemp)
     {
-        printf '# RAD-PROTOCOLO (ADR-0112) — gerado por %s v%s\n' "${SCRIPT_NAME}" "${SCRIPT_VERSION}"
-        printf '# Libera a Platform a gravar o padrão via setter, sem senha.\n'
-        printf '%s ALL=(root) NOPASSWD: %s\n' "${ssh_user}" "${PROTO_SETTER_PATH}"
+        printf '# RAD-PROTOCOLO (ADR-0112/0126) — gerado por %s v%s\n' "${SCRIPT_NAME}" "${SCRIPT_VERSION}"
+        printf '# Libera a Platform a gravar o padrão e os wrappers via setters, sem senha.\n'
+        printf '%s ALL=(root) NOPASSWD: %s, %s\n' \
+            "${ssh_user}" "${PROTO_SETTER_PATH}" "${PROTO_WRAP_SETTER_PATH}"
     } > "${tmp}"
 
     # Valida ANTES de instalar — um sudoers quebrado trava o sudo do host todo.
@@ -2150,7 +2160,7 @@ EOF
     install -o root -g root -m 440 "${tmp}" "${PROTO_SUDOERS_FILE}" \
         || { rm -f "${tmp}"; die "Falha ao instalar ${PROTO_SUDOERS_FILE}."; }
     rm -f "${tmp}"
-    ok "sudoers: ${ssh_user} roda ${PROTO_SETTER_PATH} via sudo NOPASSWD (${PROTO_SUDOERS_FILE}, 440)."
+    ok "sudoers: ${ssh_user} roda ${PROTO_SETTER_PATH} e ${PROTO_WRAP_SETTER_PATH} via sudo NOPASSWD (${PROTO_SUDOERS_FILE}, 440)."
 }
 
 # Smoke test pós-instalação. Não aborta a instalação se algo falhar (já está
@@ -2179,6 +2189,19 @@ _proto_smoke_test() {
     else
         warn "AGI não emitiu PROTOCOL — depure: sudo -u asterisk python3 ${PROTO_AGI_PATH}"
     fi
+
+    # 3. Setter de wrappers presente e funcional (ADR-0126): empurra um conjunto
+    #    VAZIO pelo stdin — não cria nenhum wrapper, só valida que o setter roda.
+    if [[ -x "${PROTO_WRAP_SETTER_PATH}" ]]; then
+        if printf '{"destinations":[]}' \
+            | RAD_WRAP_NO_RELOAD=1 python3 "${PROTO_WRAP_SETTER_PATH}" >/dev/null 2>&1; then
+            ok "Setter de wrappers OK (${PROTO_WRAP_SETTER_PATH})."
+        else
+            warn "Setter de wrappers retornou erro — depure: echo '{\"destinations\":[]}' | python3 ${PROTO_WRAP_SETTER_PATH}"
+        fi
+    else
+        warn "Setter de wrappers ausente/não-executável: ${PROTO_WRAP_SETTER_PATH}"
+    fi
 }
 
 # Imprime instruções de wiring (NÃO automatizado — o instalador não toca em
@@ -2192,6 +2215,7 @@ ${C_BOLD}${C_GREEN}═══ RAD-PROTOCOLO instalado (central autônoma — ADR-
   ${C_BOLD}Dialplan${C_RESET}:   /etc/asterisk/extensions_rad.conf  ${C_DIM}(contexto [rad-protocolo])${C_RESET}
   ${C_BOLD}Padrão${C_RESET}:     ${PROTO_PATTERN_PATH}  ${C_DIM}(default: ${PROTO_DEFAULT_TEMPLATE})${C_RESET}
   ${C_BOLD}Setter${C_RESET}:     ${PROTO_SETTER_PATH}  ${C_DIM}(escrita do padrão pela Platform via sudo)${C_RESET}
+  ${C_BOLD}Wrappers${C_RESET}:   ${PROTO_WRAP_CONF_PATH}  ${C_DIM}(GERADO pelo setter ${PROTO_WRAP_SETTER_PATH} — ADR-0126)${C_RESET}
 
 ${C_BOLD}A central é independente da Platform.${C_RESET} O AGI lê o padrão do arquivo
 local a cada chamada — sem rede, sem spool. A Platform sobrescreve esse arquivo
@@ -2199,14 +2223,21 @@ via SSH (sudo no setter ${PROTO_SETTER_PATH}) quando você salva um padrão na U
 e lê os registros do CDR (não há mais POST do AGI).
 
 ${C_BOLD}${C_YELLOW}IMPORTANTE — o roteamento NÃO foi alterado.${C_RESET}
-O contexto [rad-protocolo] está instalado mas INERTE. Pra ativar numa rota,
-faça a Inbound Route chamar a subrotina (seta o protocolo e RETORNA, sem
-Answer e sem mudar o fluxo):
+O contexto [rad-protocolo] está instalado mas INERTE. Há dois caminhos pra ativá-lo:
 
-  ${C_DIM}same => n,Gosub(rad-protocolo,s,1)${C_RESET}
+  ${C_BOLD}1) Gerenciado pela UI (ADR-0126, recomendado):${C_RESET} na tela
+     ${C_BOLD}Roteamento de Protocolo${C_RESET} da Platform, crie um destino — ela materializa
+     o wrapper [rad-protocolo-wrap-<slug>] via o setter ${PROTO_WRAP_SETTER_PATH}
+     e registra a Custom Destination no FreePBX. Você só aponta a Inbound Route
+     nessa Custom Destination (dropdown do GUI).
+
+  ${C_BOLD}2) Manual (legado):${C_RESET} a Inbound Route chama a subrotina direto (seta o
+     protocolo e RETORNA, sem Answer e sem mudar o fluxo):
+
+       ${C_DIM}same => n,Gosub(rad-protocolo,s,1)${C_RESET}
 
 ${C_BOLD}Cutover recomendado (canary):${C_RESET}
-  1. Ative o Gosub em UMA Inbound Route de teste.
+  1. Ative em UMA Inbound Route de teste (via UI ou Gosub manual).
   2. Ligue pra ela; confirme o protocolo no CDR (accountcode) e no Dashboard.
   3. Só então propague pras demais rotas.
   Passo a passo completo: runbook ${C_BOLD}protocol-cutover${C_RESET} no vault.
@@ -2330,6 +2361,31 @@ install_rad_protocolo() {
         printf '\n#include %s\n' "${PROTO_DIALPLAN_INCLUDE}" >> "${PROTO_EXTENSIONS_CONF}" \
             || die "Falha ao adicionar #include em ${PROTO_EXTENSIONS_CONF}."
         ok "#include ${PROTO_DIALPLAN_INCLUDE} adicionado a ${PROTO_EXTENSIONS_CONF}."
+    fi
+
+    # ─── 5.7b  Wrappers de roteamento (ADR-0126) ───
+    # O arquivo de wrappers é GERADO pelo setter rad-pbx-set-wrapper a cada push
+    # da Platform. Aqui só semeamos um arquivo vazio (pra o #include não quebrar
+    # antes do 1º push) e garantimos o include. Idempotente.
+    if [[ ! -f "${PROTO_WRAP_CONF_PATH}" ]]; then
+        local wtmp; wtmp=$(mktemp)
+        {
+            printf '; RAD-PROTOCOLO wrappers (ADR-0126) — GERADO pela Platform via setter.\n'
+            printf '; Vazio até o 1º push de um destino na UI. NÃO edite à mão.\n'
+        } > "${wtmp}"
+        install -o root -g asterisk -m 640 "${wtmp}" "${PROTO_WRAP_CONF_PATH}" \
+            || { rm -f "${wtmp}"; die "Falha ao semear ${PROTO_WRAP_CONF_PATH}."; }
+        rm -f "${wtmp}"
+        ok "Semeado ${PROTO_WRAP_CONF_PATH} (vazio, 640 root:asterisk)."
+    else
+        ok "${PROTO_WRAP_CONF_PATH} já existe — mantido (gerenciado pela Platform)."
+    fi
+    if grep -qxF "#include ${PROTO_WRAP_DIALPLAN_INCLUDE}" "${PROTO_EXTENSIONS_CONF}" 2>/dev/null; then
+        ok "#include ${PROTO_WRAP_DIALPLAN_INCLUDE} já presente em ${PROTO_EXTENSIONS_CONF}."
+    else
+        printf '\n#include %s\n' "${PROTO_WRAP_DIALPLAN_INCLUDE}" >> "${PROTO_EXTENSIONS_CONF}" \
+            || die "Falha ao adicionar #include de wrappers em ${PROTO_EXTENSIONS_CONF}."
+        ok "#include ${PROTO_WRAP_DIALPLAN_INCLUDE} adicionado a ${PROTO_EXTENSIONS_CONF}."
     fi
 
     # ─── 5.8  Smoke test ───
