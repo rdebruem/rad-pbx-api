@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.16.4"
+readonly SCRIPT_VERSION="0.16.5"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -2059,6 +2059,47 @@ PY
     ok "Padrão default: ${PROTO_PATTERN_PATH}  (${PROTO_DEFAULT_TEMPLATE}, 640 root:asterisk)"
 }
 
+# Garante que o /etc/sudoers carrega os drop-ins de /etc/sudoers.d. Em algumas
+# Issabel o /etc/sudoers foi editado à mão e perdeu a diretiva includedir; sem
+# ela, o drop-in do setter (rad-pbx-protocol) é IGNORADO silenciosamente —
+# `sudo -l` não lista a regra e o push do padrão pela Platform falha com "a
+# password is required" (setter sai com code 1). Idempotente.
+_proto_ensure_sudoers_includedir() {
+    local sudoers="/etc/sudoers"
+    if [[ ! -r "${sudoers}" ]]; then
+        warn "Não consegui ler ${sudoers} pra checar o includedir — confirme manualmente que ele carrega /etc/sudoers.d."
+        return
+    fi
+    # sudo 1.8 usa '#includedir', sudo 1.9 usa '@includedir'. Qualquer um serve.
+    if grep -qE '^[[:space:]]*[#@]includedir[[:space:]]+/etc/sudoers\.d' "${sudoers}"; then
+        ok "sudoers: ${sudoers} já inclui /etc/sudoers.d (o drop-in será carregado)."
+        return
+    fi
+
+    warn "sudoers: ${sudoers} NÃO inclui /etc/sudoers.d — sem isso o drop-in do setter seria ignorado. Adicionando a diretiva."
+    ensure_backup_dir
+    local bak; bak=$(backup_path_for "sudoers")
+    cp -p "${sudoers}" "${bak}" || die "Falha ao backupear ${sudoers}."
+
+    # Valida num tmp antes de tocar o arquivo real — um sudoers quebrado trava o
+    # sudo do host inteiro.
+    local tmp; tmp=$(mktemp)
+    cp -p "${sudoers}" "${tmp}" || { rm -f "${tmp}"; die "Falha ao preparar ${sudoers} temporário."; }
+    printf '\n#includedir /etc/sudoers.d\n' >> "${tmp}"
+    if command -v visudo >/dev/null 2>&1; then
+        if ! visudo -cf "${tmp}" >/dev/null 2>&1; then
+            rm -f "${tmp}"
+            die "Falha ao validar ${sudoers} com a diretiva includedir (visudo -c). Nada foi alterado; backup em ${bak}."
+        fi
+    else
+        warn "visudo não encontrado — gravando ${sudoers} sem validação prévia (backup em ${bak})."
+    fi
+    install -o root -g root -m 440 "${tmp}" "${sudoers}" \
+        || { rm -f "${tmp}"; die "Falha ao gravar ${sudoers} (backup em ${bak})."; }
+    rm -f "${tmp}"
+    ok "sudoers: diretiva '#includedir /etc/sudoers.d' adicionada a ${sudoers} (backup: ${bak})."
+}
+
 # Configura o sudoers para o usuário SSH da Platform rodar o setter sem senha
 # (ADR-0112). Sem isso, o push do padrão pela Platform falha com "a password
 # is required". Idempotente: reescreve o arquivo. Pula se o usuário for vazio
@@ -2101,6 +2142,10 @@ EOF
     else
         warn "visudo não encontrado — gravando sem validação prévia (revise ${PROTO_SUDOERS_FILE})."
     fi
+
+    # Garante que o /etc/sudoers carrega /etc/sudoers.d antes de depositar o
+    # drop-in — senão a regra NOPASSWD abaixo seria gravada mas ignorada.
+    _proto_ensure_sudoers_includedir
 
     install -o root -g root -m 440 "${tmp}" "${PROTO_SUDOERS_FILE}" \
         || { rm -f "${tmp}"; die "Falha ao instalar ${PROTO_SUDOERS_FILE}."; }

@@ -2,6 +2,17 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.16.5] — 2026-06-21
+
+### Corrigido (opção 5 — drop-in do setter ignorado quando `/etc/sudoers` não tem `includedir`)
+
+- **Bug reportado no 1º cliente de testes**: após rodar a opção 5 e cadastrar um padrão na UI da Platform, o push falhava com badge **"push: erro no envio"** / "setter saiu com code 1", e o `/etc/rad-pbx/protocol-pattern.json` não mudava de `version`.
+- **Root cause**: o `/etc/sudoers` daquela Issabel havia sido editado à mão e **perdeu a diretiva `#includedir /etc/sudoers.d`**. Sem ela, o sudo **ignora silenciosamente** todos os drop-ins de `/etc/sudoers.d` — inclusive o `rad-pbx-protocol` que a opção 5 grava. O arquivo ficava válido (`visudo -cf` OK) mas `sudo -l -U <user>` não listava a regra → `sudo -n` pedia senha → `a password is required` → o setter saía com code 1. Afetava também os demais drop-ins (`issabel`, `rad-reload`).
+- **Fix**: nova função `_proto_ensure_sudoers_includedir`, chamada por `_proto_setup_sudoers` **antes** de depositar o drop-in. Ela checa `#includedir`/`@includedir /etc/sudoers.d` (sudo 1.8 e 1.9), e se faltar faz backup datado + append da diretiva, validando com `visudo -cf` antes de gravar (restaura em caso de falha).
+- **`SCRIPT_VERSION` 0.16.4 → 0.16.5.**
+
+> Para centrais já afetadas: rodar `grep includedir /etc/sudoers` — se vazio, `echo '#includedir /etc/sudoers.d' >> /etc/sudoers` (validar com `visudo -cf`). Ou re-rodar a opção 5 da 0.16.5 (idempotente — adiciona a diretiva se faltar). O lado da Platform: o `protocol-preflight.sh` (rad-ecosystem) passou a marcar **FAIL** quando o includedir falta.
+
 ## [0.16.4] — 2026-05-31
 
 ### Corrigido (opção 1 — `deny = 0.0.0.0/0` quebrava o módulo manager do Asterisk)
