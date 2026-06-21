@@ -2,6 +2,16 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versionamento [Semantic Versioning](https://semver.org/).
 
+## [0.16.6] — 2026-06-21
+
+### Adicionado (opção 5 — setter de wrappers de roteamento, ADR-0126)
+
+- **Roteamento de protocolo gerenciado pela Platform** ([ADR-0126](../RAD-ECOSYSTEM/vault/04-ARCHITECTURE/adrs/ADR-0126-pbx-protocolo-roteamento-via-ui.md)): a opção 5 passa a instalar o setter privilegiado `rad-pbx-set-wrapper` (→ `/usr/local/sbin`, root:root 755), que materializa os contextos `[rad-protocolo-wrap-<slug>]` em `/etc/asterisk/extensions_rad_wrap.conf` a partir de dados validados pela Platform (allowlist de `gotoTarget` + slug; único componente autorizado a gerar dialplan).
+- Garante o `#include extensions_rad_wrap.conf` no `extensions.conf` e **semeia um arquivo de wrappers vazio** (640 root:asterisk) pra o include não quebrar antes do 1º push. Idempotente.
+- O sudoers do drop-in passa a liberar NOPASSWD para **os dois setters** (`rad-pbx-set-pattern` e `rad-pbx-set-wrapper`) ao mesmo usuário SSH.
+- Smoke test valida o setter de wrappers (push de conjunto vazio). Texto de wiring atualizado (caminho via UI "Roteamento de Protocolo" + legado Gosub).
+- **`SCRIPT_VERSION` 0.16.5 → 0.16.6.**
+
 ## [0.16.5] — 2026-06-21
 
 ### Corrigido (opção 5 — drop-in do setter ignorado quando `/etc/sudoers` não tem `includedir`)
