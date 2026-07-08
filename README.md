@@ -15,6 +15,7 @@ Um único script `install.sh` apresenta um menu com componentes que podem ser pr
 4. **RAD Connector** — provisiona na central os usuários técnicos (SSH, AMI, MariaDB, ECCP) que o backend do RAD PBX Platform usa pra falar com ela.
 5. **RAD-PROTOCOLO (ADR-0112)** — instala o gerador de número de protocolo de chamada (AGI + dialplan stub). Não altera roteamento — ativação é manual por Inbound Route.
 6. **OpenVPN Client** — conecta a central à VPN do datacenter de controle da RAD (onde vive a Platform).
+7. **Validar prontidão WebRTC** — diagnóstico **read-only** (não altera nada): checa versão do Asterisk, `res_http_websocket`, `res_srtp`, `chan_pjsip`/transport WSS, HTTPS, ICE/STUN e `coturn`, e diz se a central pode servir um webphone no navegador e a escuta ao vivo (spy). Asterisk 11 / Issabel 4 é **legado** (não interopera com WebRTC de navegador moderno).
 
 Mais opções entram conforme o ecossistema cresce.
 

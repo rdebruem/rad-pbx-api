@@ -21,7 +21,7 @@ set -euo pipefail
 # ════════════════════════════════════════════════════════════════════════
 
 readonly SCRIPT_NAME="rad-pbx-api-installer"
-readonly SCRIPT_VERSION="0.16.6"
+readonly SCRIPT_VERSION="0.17.0"
 
 # Repo PRIVADO de onde os artefatos vêm. Não precisa mudar a menos que
 # você queira testar contra um fork seu.
@@ -1000,6 +1000,11 @@ ${C_BOLD}Menu principal${C_RESET}
        └─ instala openvpn + extrai perfil do pfSense (.zip) + sobe a unit
           openvpn-client@{cliente}.service. Conecta o servidor à VPN do DC.
 
+  ${C_BOLD}7${C_RESET})  Validar prontidão WebRTC (webphone / spy)
+       └─ diagnóstico READ-ONLY: versão do Asterisk, res_http_websocket,
+          res_srtp, chan_pjsip/WSS, HTTPS, ICE/STUN e coturn. Diz se a central
+          pode servir webphone no navegador (Asterisk 11 = legado).
+
   ${C_BOLD}q${C_RESET})  Sair
 
 EOF
@@ -1013,6 +1018,7 @@ EOF
         4)  install_rad_connector ;;
         5)  install_rad_protocolo ;;
         6)  install_openvpn_client ;;
+        7)  check_webrtc_readiness ;;
         q|Q) info "Saindo."; exit 0 ;;
         "") warn "Input vazio (provavelmente stdin do bash não está atrelado ao terminal — curl|sudo bash em alguns sudos). Use: wget https://raw.githubusercontent.com/rdebruem/rad-pbx-api/main/install.sh && chmod +x install.sh && sudo ./install.sh"; exit 1 ;;
         *)  warn "Opção inválida: '${choice}'"; sleep 1; show_menu ;;
@@ -2539,6 +2545,95 @@ EOF
     ok "OpenVPN client conectado à VPN do DC RAD."
     ok "Pronto! Volte ao menu (Enter) ou Ctrl+C pra sair."
     read -r </dev/tty || true
+    show_menu
+}
+
+# ════════════════════════════════════════════════════════════════════════
+#  Opção 7 — Validar prontidão WebRTC (webphone / spy)
+# ════════════════════════════════════════════════════════════════════════
+#
+# Diagnóstico READ-ONLY. Roda `asterisk -rx` direto (como root nesta central,
+# sem o problema de permissão do socket que afeta o SSH da Platform) e diz se a
+# central pode servir um webphone no navegador + escuta ao vivo (spy). WebRTC de
+# navegador moderno exige Asterisk 12+/chan_pjsip; Issabel 4 / Asterisk 11 é
+# legado (não interopera). NÃO altera nada — só lê.
+check_webrtc_readiness() {
+    printf '\n%s═══ Validação de prontidão WebRTC (webphone / spy) ═══%s\n\n' \
+        "${C_BOLD}" "${C_RESET}"
+
+    if ! command -v asterisk >/dev/null 2>&1; then
+        err "Binário 'asterisk' não encontrado no PATH."
+        read -r -p "Pressione Enter pra voltar ao menu…" _ </dev/tty
+        show_menu; return
+    fi
+
+    local ver_raw
+    ver_raw=$(asterisk -rx 'core show version' 2>/dev/null)
+    if printf '%s' "${ver_raw}" | grep -qi 'Unable to connect to remote asterisk'; then
+        err "Sem acesso ao CLI do Asterisk. Rode como root (ou usuário do grupo asterisk)."
+        read -r -p "Pressione Enter pra voltar ao menu…" _ </dev/tty
+        show_menu; return
+    fi
+
+    local ver major
+    ver=$(printf '%s' "${ver_raw}" | grep -oiE 'Asterisk (certified/)?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+    major=$(printf '%s' "${ver}" | grep -oE '[0-9]+' | head -1); major="${major:-0}"
+    info "Asterisk: ${ver:-desconhecido}  (major ${major})"
+    printf '\n'
+
+    # Coleta — cada checagem é tolerante a módulo/arquivo ausente.
+    local ws=0 srtp=0 pjsip=0 wss=0 http_srv=0 https_srv=0 tls_conf=0 ice=0 stun=0 turn=0
+    asterisk -rx 'module show like res_http_websocket' 2>/dev/null | grep -qi 'res_http_websocket' && ws=1
+    asterisk -rx 'module show like res_srtp'            2>/dev/null | grep -qi 'res_srtp'           && srtp=1
+    asterisk -rx 'module show like res_pjsip.so'        2>/dev/null | grep -qi 'res_pjsip'          && pjsip=1
+    asterisk -rx 'pjsip show transports' 2>/dev/null | grep -qiE '\bwss\b' && wss=1
+    local http_raw; http_raw=$(asterisk -rx 'http show status' 2>/dev/null)
+    printf '%s' "${http_raw}" | grep -qiE 'Server Enabled'       && http_srv=1
+    printf '%s' "${http_raw}" | grep -qiE 'HTTPS Server Enabled' && https_srv=1
+    if [[ -f /etc/asterisk/http.conf ]] \
+        && grep -qiE '^[[:space:]]*tlsenable[[:space:]]*=[[:space:]]*yes' /etc/asterisk/http.conf \
+        && grep -qiE '^[[:space:]]*tlscertfile[[:space:]]*=' /etc/asterisk/http.conf; then
+        tls_conf=1
+    fi
+    if [[ -f /etc/asterisk/rtp.conf ]]; then
+        grep -qiE '^[[:space:]]*icesupport[[:space:]]*=[[:space:]]*(yes|true)' /etc/asterisk/rtp.conf && ice=1
+        grep -qiE '^[[:space:]]*stunaddr[[:space:]]*=' /etc/asterisk/rtp.conf && stun=1
+    fi
+    if command -v systemctl >/dev/null 2>&1 \
+        && { systemctl is-active --quiet coturn 2>/dev/null || systemctl is-active --quiet turnserver 2>/dev/null; }; then
+        turn=1
+    elif command -v ss >/dev/null 2>&1 && ss -lnu 2>/dev/null | grep -qE ':3478|:5349'; then
+        turn=1
+    fi
+
+    # Checklist ✓/✗ (C_GREEN/C_RED já são bytes ESC reais — usar %s).
+    local _y="${C_GREEN}✓${C_RESET}" _n="${C_RED}✗${C_RESET}" mk
+    _wr_row() { if [[ "$1" = 1 ]]; then mk="${_y}"; else mk="${_n}"; fi; printf '   %s  %s\n' "${mk}" "$2"; }
+    _wr_row "${ws}"        "res_http_websocket (transporte WebSocket)"
+    _wr_row "${srtp}"      "res_srtp (DTLS-SRTP)"
+    _wr_row "${pjsip}"     "chan_pjsip"
+    _wr_row "${wss}"       "transport WSS (pjsip show transports)"
+    _wr_row "${http_srv}"  "HTTP server (http show status)"
+    _wr_row "${https_srv}" "HTTPS server (necessário p/ WSS)"
+    _wr_row "${tls_conf}"  "TLS em http.conf (tlsenable + tlscertfile)"
+    _wr_row "${ice}"       "ICE support (rtp.conf)"
+    _wr_row "${stun}"      "STUN addr (rtp.conf)"
+    _wr_row "${turn}"      "TURN/coturn no host"
+    printf '\n'
+
+    if [[ "${major}" -le 11 ]]; then
+        err "LEGADO (Asterisk ${major}) — não interopera com WebRTC de navegador. Requer migração p/ Asterisk 16+/chan_pjsip antes de servir webphone/spy."
+    elif [[ "${ws}" = 1 && "${wss}" = 1 && "${https_srv}" = 1 && "${srtp}" = 1 ]]; then
+        ok "PRONTO — a central pode servir webphone no navegador e escuta ao vivo."
+        [[ "${turn}" = 1 ]] || warn "coturn não detectado — necessário p/ o áudio atravessar NAT (confirme o TURN no host)."
+    else
+        warn "PARCIAL — Asterisk moderno, mas falta configurar WSS/HTTPS/SRTP (veja os ✗ acima)."
+    fi
+
+    _log_to_file "WEBRTC-READINESS major=${major} ws=${ws} wss=${wss} https=${https_srv} srtp=${srtp} turn=${turn}"
+    printf '\n'
+    ok "Diagnóstico concluído (nada foi alterado)."
+    read -r -p "Pressione Enter pra voltar ao menu…" _ </dev/tty
     show_menu
 }
 
